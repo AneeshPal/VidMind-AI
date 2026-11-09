@@ -1,24 +1,40 @@
 
 {
-    "manifest_version": 3,
-    "name": "VidMind - YouTube AI Assistant",
-    "version": "1.0.0",
-    "description": "Ask questions about YouTube videos using AI.",
-  
-    "permissions": [
-      "sidePanel"
-    ],
-  
-    "background": {
-      "service_worker": "service-worker.js"
-    },
-  
-    "action": {
-      "default_title": "Open VidMind"
-    },
-  
-    "side_panel": {
-      "default_path": "index.html"
+  "manifest_version": 3,
+  "name": "VidMind - YouTube AI Assistant",
+  "version": "1.0.0",
+  "description": "Ask questions about YouTube videos using AI.",
+
+  "permissions": [
+    "sidePanel",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
     }
+  ],
+
+  "action": {
+    "default_title": "Open VidMind"
+  },
+
+  "side_panel": {
+    "default_path": "index.html"
   }
-  
+}
