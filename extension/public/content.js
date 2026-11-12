@@ -21,6 +21,29 @@ function formatDuration(seconds) {
   return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
+// Extract the YouTube channel name.
+function getChannelName() {
+  const selectors = [
+    "ytd-video-owner-renderer #channel-name a",
+    "ytd-video-owner-renderer #channel-name",
+    "#owner #channel-name a",
+    "#owner #channel-name",
+    "ytd-channel-name a",
+    "ytd-channel-name"
+  ];
+
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    const channelName = element?.textContent?.trim();
+
+    if (channelName) {
+      return channelName;
+    }
+  }
+
+  return null;
+}
+
 // Extract current YouTube video information.
 function getVideoInfo() {
   const url = new URL(window.location.href);
@@ -47,12 +70,7 @@ function getVideoInfo() {
       ? Math.floor(videoElement.duration)
       : null;
 
-  const channelName =
-    document.querySelector("ytd-channel-name a")
-      ?.textContent?.trim() ||
-    document.querySelector("#owner #channel-name")
-      ?.textContent?.trim() ||
-    null;
+  const channelName = getChannelName();
 
   const viewCount =
     document.querySelector("ytd-watch-info-text #info")
@@ -76,12 +94,47 @@ function getVideoInfo() {
 function sendVideoInfo() {
   const videoInfo = getVideoInfo();
 
+  if (!videoInfo) return;
+
+  console.log("VidMind video information:", {
+    videoId: videoInfo.videoId,
+    title: videoInfo.title,
+    channelName: videoInfo.channelName
+  });
+
   chrome.runtime.sendMessage({
     type: "YOUTUBE_VIDEO_CHANGED",
     payload: videoInfo
   }).catch((error) => {
     console.log("Could not send video information:", error);
   });
+}
+
+// Retry metadata extraction because YouTube loads
+// title and channel information asynchronously.
+function retryVideoInfo() {
+  let attempts = 0;
+  const maxAttempts = 10;
+
+  const interval = setInterval(() => {
+    attempts++;
+
+    const videoInfo = getVideoInfo();
+
+    if (
+      videoInfo &&
+      videoInfo.channelName
+    ) {
+      sendVideoInfo();
+      clearInterval(interval);
+      return;
+    }
+
+    if (attempts >= maxAttempts) {
+      sendVideoInfo();
+      clearInterval(interval);
+    }
+  }, 1000);
 }
 
 // Seek YouTube video to a specific timestamp.
@@ -173,15 +226,21 @@ chrome.runtime.onMessage.addListener(
 
 // Initial video detection.
 sendVideoInfo();
+retryVideoInfo();
 
 // Update metadata when video loads.
 function attachVideoMetadataListener() {
   const videoElement = document.querySelector("video");
 
   if (videoElement) {
-    videoElement.addEventListener("loadedmetadata", sendVideoInfo, {
-      once: true
-    });
+    videoElement.addEventListener(
+      "loadedmetadata",
+      () => {
+        sendVideoInfo();
+        retryVideoInfo();
+      },
+      { once: true }
+    );
   }
 }
 
@@ -191,6 +250,7 @@ attachVideoMetadataListener();
 window.addEventListener("yt-navigate-finish", () => {
   setTimeout(() => {
     sendVideoInfo();
+    retryVideoInfo();
     attachVideoMetadataListener();
   }, 1000);
 });
@@ -198,6 +258,7 @@ window.addEventListener("yt-navigate-finish", () => {
 window.addEventListener("popstate", () => {
   setTimeout(() => {
     sendVideoInfo();
+    retryVideoInfo();
     attachVideoMetadataListener();
   }, 1000);
 });

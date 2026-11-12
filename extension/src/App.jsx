@@ -38,7 +38,6 @@ function renderMessageContent(content, onTimestampClick) {
   const timestampRegex = /\b(?:\d{1,2}:)?\d{1,2}:\d{2}\b/g;
 
   const parts = [];
-
   let lastIndex = 0;
   let match;
   let key = 0;
@@ -86,7 +85,6 @@ function renderMessageContent(content, onTimestampClick) {
 
 function App() {
   const [video, setVideo] = useState(null);
-
   const [processingStatus, setProcessingStatus] = useState("idle");
   const [processingError, setProcessingError] = useState("");
 
@@ -97,6 +95,8 @@ function App() {
   const lastRequestedVideoId = useRef(null);
   const activeVideoId = useRef(null);
 
+  // Process a newly detected YouTube video.
+  
   // Process a newly detected YouTube video.
   const processVideo = useCallback(async (videoInfo) => {
     if (!videoInfo?.videoId) return;
@@ -125,7 +125,9 @@ function App() {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            video_id: videoId
+            video_id: videoId,
+            title: videoInfo.title || "",
+            channel_name: videoInfo.channelName || ""
           })
         }
       );
@@ -143,6 +145,12 @@ function App() {
       setProcessingStatus("ready");
 
       console.log("VidMind video processed:", data);
+
+      console.log("Video metadata sent:", {
+        videoId,
+        title: videoInfo.title,
+        channelName: videoInfo.channelName
+      });
 
     } catch (error) {
       if (activeVideoId.current !== videoId) return;
@@ -225,11 +233,13 @@ function App() {
           }
         );
 
-        if (!response?.success || !response.videoInfo) {
+        const videoInfo = response?.videoInfo ?? response;
+
+        if (!videoInfo?.videoId) {
           throw new Error("Video information was not returned.");
         }
 
-        handleVideoUpdate(response.videoInfo);
+        handleVideoUpdate(videoInfo);
 
       } catch (error) {
         console.error("Video detection failed:", error);
@@ -258,33 +268,61 @@ function App() {
     processVideo(video);
   };
 
-  // Find the correct YouTube tab.
-  const findYouTubeTab = async (chromeApi) => {
-    const tabs = await chromeApi.tabs.query({
-      currentWindow: true
-    });
+  // Find a YouTube tab using its actual video ID.
+  const findYouTubeTab = async (videoId) => {
+    if (!videoId) {
+      console.error("VidMind: Video ID is missing.");
+      return null;
+    }
 
-    return tabs.find((tab) => {
-      if (!tab.url || !video?.videoId) return false;
+    const chromeApi = globalThis.chrome;
+
+    const tabs = await chromeApi.tabs.query({});
+
+    const youtubeTabs = tabs.filter((tab) => {
+      if (!tab.url) return false;
 
       try {
         const url = new URL(tab.url);
 
-        const tabVideoId =
-          url.searchParams.get("v") ||
-          (url.pathname.startsWith("/shorts/")
-            ? url.pathname.split("/")[2]
-            : null);
-
         return (
-          url.hostname.includes("youtube.com") &&
-          tabVideoId === video.videoId
+          url.hostname === "youtube.com" ||
+          url.hostname.endsWith(".youtube.com")
         );
-
       } catch {
         return false;
       }
     });
+
+    const matchingTab = youtubeTabs.find((tab) => {
+      const url = new URL(tab.url);
+
+      let currentVideoId = null;
+
+      if (url.pathname === "/watch") {
+        currentVideoId = url.searchParams.get("v");
+      } else if (url.pathname.startsWith("/shorts/")) {
+        currentVideoId = url.pathname.split("/")[2];
+      }
+
+      return currentVideoId === videoId;
+    });
+
+    if (matchingTab) {
+      console.log(
+        "VidMind: Matching YouTube tab found:",
+        matchingTab.url
+      );
+
+      return matchingTab;
+    }
+
+    console.error("VidMind: No matching YouTube tab found.", {
+      requestedVideoId: videoId,
+      availableTabs: youtubeTabs.map((tab) => tab.url)
+    });
+
+    return null;
   };
 
   // Jump to a timestamp.
@@ -294,14 +332,17 @@ function App() {
     try {
       const chromeApi = globalThis.chrome;
 
-      const youtubeTab = await findYouTubeTab(chromeApi);
+      // IMPORTANT: Pass the actual video ID, not chromeApi.
+      const videoId = activeVideoId.current;
+
+      const youtubeTab = await findYouTubeTab(videoId);
 
       if (!youtubeTab?.id) {
         console.error("Matching YouTube tab not found.");
         return;
       }
 
-      // First attempt: message the content script.
+      // First attempt: seek using the content script.
       try {
         const result = await chromeApi.tabs.sendMessage(
           youtubeTab.id,
@@ -332,15 +373,17 @@ function App() {
       // Fallback: navigate to the same video at the requested time.
       const url = new URL(youtubeTab.url);
 
-      url.searchParams.set("t", `${Math.floor(seconds)}s`);
+      if (url.pathname === "/watch") {
+        url.searchParams.set("t", `${Math.floor(seconds)}s`);
+      } else if (url.pathname.startsWith("/shorts/")) {
+        url.searchParams.set("t", `${Math.floor(seconds)}s`);
+      }
 
       await chromeApi.tabs.update(youtubeTab.id, {
         url: url.toString()
       });
 
-      console.log(
-        "VidMind URL fallback:", url.toString()
-      );
+      console.log("VidMind URL fallback:", url.toString());
 
     } catch (error) {
       console.error("Timestamp navigation failed:", error);

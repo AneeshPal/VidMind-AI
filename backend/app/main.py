@@ -20,8 +20,7 @@ app = FastAPI(
 )
 
 
-# Allow requests from the local React app and
-# the Chrome extension during development.
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,15 +30,24 @@ app.add_middleware(
 )
 
 
-# Request models
+# --------------------------------------------------
+# REQUEST MODELS
+# --------------------------------------------------
+
 class ProcessVideoRequest(BaseModel):
     video_id: str
+    title: str | None = None
+    channel_name: str | None = None
 
 
 class AskRequest(BaseModel):
     video_id: str
     question: str
 
+
+# --------------------------------------------------
+# HOME
+# --------------------------------------------------
 
 @app.get("/")
 def home():
@@ -49,6 +57,10 @@ def home():
     }
 
 
+# --------------------------------------------------
+# HEALTH CHECK
+# --------------------------------------------------
+
 @app.get("/health")
 def health_check():
     return {
@@ -56,16 +68,28 @@ def health_check():
     }
 
 
-# Process YouTube video
+# --------------------------------------------------
+# PROCESS YOUTUBE VIDEO
+# --------------------------------------------------
+
 @app.post("/process-video")
 def process_video_endpoint(request: ProcessVideoRequest):
 
+    if not request.video_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Video ID cannot be empty."
+        )
+
     try:
-        result = process_video(request.video_id)
+        result = process_video(
+            video_id=request.video_id,
+            title=request.title,
+            channel_name=request.channel_name
+        )
 
         return {
             "message": "Video processing completed",
-            "video_id": request.video_id,
             **result
         }
 
@@ -76,13 +100,18 @@ def process_video_endpoint(request: ProcessVideoRequest):
         )
 
     except Exception as error:
+        print("Video processing error:", error)
+
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail="An error occurred while processing the video."
         )
 
 
-# Ask questions about a video
+# --------------------------------------------------
+# ASK QUESTIONS ABOUT A VIDEO
+# --------------------------------------------------
+
 @app.post("/ask")
 def ask_endpoint(request: AskRequest):
 
@@ -111,7 +140,9 @@ def ask_endpoint(request: AskRequest):
         )
 
     except Exception as error:
+        print("Question answering error:", error)
+
         raise HTTPException(
             status_code=500,
-            detail=str(error)
+            detail="An error occurred while answering the question."
         )

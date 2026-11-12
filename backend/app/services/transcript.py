@@ -6,11 +6,10 @@ def extract_transcript(video_id: str):
     """
     Extract YouTube transcript while preserving timestamps.
 
-    Returns:
-        A list of dictionaries containing:
-        - text
-        - start
-        - duration
+    Returns a list of dictionaries containing:
+    - text
+    - start
+    - duration
     """
 
     api = YouTubeTranscriptApi()
@@ -43,7 +42,10 @@ def extract_transcript(video_id: str):
     if not transcript_segments:
         raise ValueError("Transcript is empty.")
 
-    print("Transcript extracted successfully!")
+    print("\n========== TRANSCRIPT EXTRACTION ==========")
+    print("Video ID:", video_id)
     print("Total transcript segments:", len(transcript_segments))
+    print("First segment:", transcript_segments[0])
+    print("===========================================\n")
 
     return transcript_segments

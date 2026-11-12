@@ -1,25 +1,28 @@
 
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import (
-    RunnableParallel,
-    RunnablePassthrough,
-    RunnableLambda
-)
-from langchain_core.output_parsers import StrOutputParser
+import re
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 
 from app.services.transcript import extract_transcript
 
 
-# Store FAISS indexes for processed videos.
+# --------------------------------------------------
+# GLOBAL STORAGE
+# --------------------------------------------------
+
 video_stores = {}
+video_documents = {}
+video_metadata = {}
 
 
-# OpenAI models.
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
+
 embeddings = OpenAIEmbeddings(
     model="text-embedding-3-small"
 )
@@ -30,52 +33,163 @@ llm = ChatOpenAI(
 )
 
 
-# Prompt with timestamp instructions.
-prompt = PromptTemplate(
-    template="""
-You are VidMind, an AI assistant that answers questions about YouTube videos.
+# --------------------------------------------------
+# PASS 1: SPEAKER AND ROLE ANALYSIS
+# --------------------------------------------------
 
-Answer the user's question using ONLY the provided transcript context.
+identity_prompt = ChatPromptTemplate.from_template("""
+You are an evidence analyst for VidMind, a YouTube video assistant.
 
-Important rules:
+Your task is to analyze the provided transcript excerpts and video metadata.
 
-1. Give accurate and useful answers.
-2. Do not invent information that is not present in the transcript.
-3. When referring to a specific discussion, include its timestamp.
-4. Use the exact timestamp provided in the context.
-5. Write timestamps in MM:SS format, for example [05:42].
-6. If multiple relevant moments exist, include multiple timestamps.
-7. If the information is unavailable, say:
-   "I couldn't find this information in the video."
-8. For summary questions, summarize the main topics and include timestamps for important sections.
-9. For questions about people, identify them using the transcript.
+Identify the people involved in the video and their roles.
 
-Transcript context:
+Possible roles:
+- Host
+- Interviewer
+- Guest
+- Main speaker
+- Presenter
+- Teacher
+- Co-host
+- Other participant
 
+IMPORTANT RULES:
+
+1. Distinguish the person speaking from the person being discussed.
+2. Distinguish a host introducing a guest from the guest introducing themselves.
+3. A sentence such as:
+   "Sam Altman, welcome to the show"
+   means someone is welcoming Sam Altman.
+   It does NOT mean Sam Altman introduced himself.
+4. A sentence such as:
+   "Hi, I am Sam Altman"
+   is a self-introduction.
+5. Use conversational clues to identify who asks questions and who answers.
+6. A video title or channel name can provide clues, but it is not
+   transcript evidence.
+7. Do not assume that the channel owner is always the interviewer.
+8. Names may appear in Hindi, English, or Hinglish.
+9. Transcripts may contain speech recognition errors.
+10. Never invent names or roles.
+
+For every identified person, provide:
+
+- Name
+- Possible role
+- Evidence from transcript
+- Timestamp
+- Evidence source: Transcript or Metadata
+- Confidence: High, Medium, or Low
+
+Also answer these separately:
+
+A. Who appears to be the host/interviewer?
+B. Who appears to be the guest/main speaker?
+C. Does the guest explicitly introduce themselves?
+D. Does the host introduce the guest?
+E. Which roles remain uncertain?
+
+If the transcript does not establish a role, say so.
+
+VIDEO METADATA:
+{metadata}
+
+TRANSCRIPT EXCERPTS:
 {context}
 
-User question:
+Return a clear, structured analysis.
+""")
 
+
+# --------------------------------------------------
+# PASS 2: FINAL ANSWER
+# --------------------------------------------------
+
+answer_prompt = ChatPromptTemplate.from_template("""
+You are VidMind, an intelligent YouTube video assistant.
+
+Answer the user's question using the transcript context and speaker analysis.
+
+USER QUESTION:
 {question}
 
-Answer:
-""",
-    input_variables=["context", "question"]
-)
+VIDEO METADATA:
+{metadata}
+
+TRANSCRIPT EVIDENCE:
+{context}
+
+SPEAKER ANALYSIS:
+{identity_analysis}
+
+IMPORTANT RULES:
+
+1. Understand English, Hindi, and Hinglish.
+2. Never invent names, identities, or events.
+3. Do not confuse the host with the guest.
+4. Do not confuse a host's introduction with a guest's self-introduction.
+5. If someone says "Welcome, Sam Altman", the person being welcomed
+   is Sam Altman. This is not proof that Sam introduced himself.
+6. Use transcript evidence to establish what was actually said.
+7. Metadata may help identify people, but clearly distinguish it
+   from transcript evidence.
+8. If the interviewer is identified only through metadata,
+   explicitly mention that.
+9. If evidence is insufficient, say that the identity or role
+   cannot be confirmed.
+10. Include timestamps when transcript evidence supports the answer.
+11. Answer the actual question directly.
+12. Do not provide the entire speaker analysis unless requested.
+
+FINAL ANSWER:
+""")
 
 
-def format_timestamp(seconds: float) -> str:
-    """Convert seconds to MM:SS or HH:MM:SS."""
+# --------------------------------------------------
+# NORMAL QUESTION PROMPT
+# --------------------------------------------------
 
-    total_seconds = max(0, int(seconds))
+normal_prompt = ChatPromptTemplate.from_template("""
+You are VidMind, an AI assistant that answers questions about YouTube videos.
 
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    remaining_seconds = total_seconds % 60
+Answer using only the transcript context provided.
 
-    if hours > 0:
+Rules:
+1. Understand English, Hindi, and Hinglish.
+2. Account for possible speech-to-text errors.
+3. Never invent facts.
+4. If the answer is unavailable in the transcript, say so.
+5. Include relevant timestamps when useful.
+6. Keep the answer direct and conversational.
+
+VIDEO:
+{metadata}
+
+TRANSCRIPT:
+{context}
+
+QUESTION:
+{question}
+
+ANSWER:
+""")
+
+
+# --------------------------------------------------
+# TIMESTAMP FORMATTER
+# --------------------------------------------------
+
+def format_timestamp(seconds):
+    seconds = int(seconds)
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    remaining_seconds = seconds % 60
+
+    if hours:
         return (
-            f"{hours}:"
+            f"{hours:02d}:"
             f"{minutes:02d}:"
             f"{remaining_seconds:02d}"
         )
@@ -83,75 +197,56 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{remaining_seconds:02d}"
 
 
+# --------------------------------------------------
+# DOCUMENT CREATION
+# --------------------------------------------------
+
 def create_timestamped_documents(segments):
-    """
-    Group transcript segments into chunks while preserving
-    each chunk's starting and ending timestamps.
-    """
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-
     documents = []
 
-    current_segments = []
-    current_length = 0
+    chunk_size = 1000
+    overlap = 200
+
+    current_text = ""
+    chunk_start = None
+    chunk_end = None
 
     for segment in segments:
-        text = segment["text"]
+        text = segment["text"].strip()
 
-        if current_segments and current_length + len(text) > 1000:
-            first = current_segments[0]
-            last = current_segments[-1]
+        if not text:
+            continue
 
-            chunk_text = " ".join(
-                item["text"] for item in current_segments
-            )
+        start = float(segment["start"])
+        end = start + float(segment["duration"])
 
+        if chunk_start is None:
+            chunk_start = start
+
+        current_text += text + " "
+        chunk_end = end
+
+        if len(current_text) >= chunk_size:
             documents.append(
                 Document(
-                    page_content=chunk_text,
+                    page_content=current_text.strip(),
                     metadata={
-                        "start": first["start"],
-                        "end": last["start"] + last["duration"]
+                        "start": chunk_start,
+                        "end": chunk_end
                     }
                 )
             )
 
-            # Keep approximately 200 characters of overlap.
-            overlap_segments = []
-            overlap_length = 0
+            current_text = current_text[-overlap:]
+            chunk_start = max(0, chunk_end - 20)
 
-            for item in reversed(current_segments):
-                overlap_segments.insert(0, item)
-                overlap_length += len(item["text"]) + 1
-
-                if overlap_length >= 200:
-                    break
-
-            current_segments = overlap_segments
-            current_length = overlap_length
-
-        current_segments.append(segment)
-        current_length += len(text) + 1
-
-    # Add the final chunk.
-    if current_segments:
-        first = current_segments[0]
-        last = current_segments[-1]
-
-        chunk_text = " ".join(
-            item["text"] for item in current_segments
-        )
-
+    if current_text.strip():
         documents.append(
             Document(
-                page_content=chunk_text,
+                page_content=current_text.strip(),
                 metadata={
-                    "start": first["start"],
-                    "end": last["start"] + last["duration"]
+                    "start": chunk_start or 0,
+                    "end": chunk_end or 0
                 }
             )
         )
@@ -159,26 +254,231 @@ def create_timestamped_documents(segments):
     return documents
 
 
-def process_video(video_id: str):
-    """
-    Extract transcript, create timestamped chunks,
-    generate embeddings and store them in FAISS.
-    """
+# --------------------------------------------------
+# SPEAKER QUESTION DETECTION
+# --------------------------------------------------
 
-    if video_id in video_stores:
-        return {
-            "message": "Video already processed",
-            "video_id": video_id,
-            "status": "already_processed",
-            "chunks": len(video_stores[video_id].index_to_docstore_id)
-        }
+def is_speaker_question(question):
+
+    patterns = [
+        r"\bspeaker\b",
+        r"\bwho is speaking\b",
+        r"\bwho is talking\b",
+        r"\bpresenter\b",
+        r"\bhost\b",
+        r"\bguest\b",
+        r"\binterviewer\b",
+        r"\bperson in the video\b",
+        r"\bwho is this\b",
+        r"\bwho is teaching\b",
+        r"\bteacher\b",
+        r"\bparticipants\b",
+        r"\bname of the person\b",
+        r"\bwho are they\b",
+        r"\bintroduce(?:d|s)? themselves\b",
+        r"\bself introduction\b",
+        r"\bintroduces himself\b",
+        r"\bintroduces herself\b",
+        r"\bwho interviewed\b",
+        r"\bwho interviews\b",
+        r"कौन बोल",
+        r"कौन बात",
+        r"कौन पढ़ा",
+        r"किसका नाम",
+        r"कौन है",
+        r"इंटरव्यू किसने"
+    ]
+
+    question = question.lower()
+
+    return any(
+        re.search(pattern, question)
+        for pattern in patterns
+    )
+
+
+# --------------------------------------------------
+# IDENTITY CHUNK SEARCH
+# --------------------------------------------------
+
+def find_identity_chunks(documents):
+
+    patterns = [
+        r"\bmy name is\b",
+        r"\bi am\b",
+        r"\bi'm\b",
+        r"\bthis is\b",
+        r"\bwelcome back\b",
+        r"\bwelcome to\b",
+        r"\bmyself\b",
+        r"\bmy channel\b",
+        r"\bhosted by\b",
+        r"\bjoining me\b",
+        r"\bwith me\b",
+        r"\bmeet\b",
+        r"\bintroducing\b",
+        r"\bmera naam\b",
+        r"\bmain hoon\b",
+        r"\bmai hoon\b",
+        r"\bhamara channel\b",
+        r"\bमेरा नाम\b",
+        r"\bमैं हूं\b",
+        r"\bमैं हूँ\b",
+        r"\bहमारा चैनल\b",
+        r"\bस्वागत है\b",
+        r"\bनमस्कार\b"
+    ]
+
+    matches = []
+
+    for document in documents:
+        content = document.page_content.lower()
+
+        if any(
+            re.search(pattern, content)
+            for pattern in patterns
+        ):
+            matches.append(document)
+
+    return matches
+
+
+# --------------------------------------------------
+# REMOVE DUPLICATE DOCUMENTS
+# --------------------------------------------------
+
+def deduplicate_documents(documents):
+
+    unique_documents = []
+    seen = set()
+
+    for document in documents:
+
+        key = (
+            document.metadata.get("start"),
+            document.metadata.get("end"),
+            document.page_content
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique_documents.append(document)
+
+    return unique_documents
+
+
+# --------------------------------------------------
+# IDENTITY CONTEXT RETRIEVAL
+# --------------------------------------------------
+
+def retrieve_identity_context(
+    vector_store,
+    all_documents,
+    question
+):
+
+    candidates = []
+
+    # Search the full transcript for possible introductions
+    candidates.extend(
+        find_identity_chunks(all_documents)
+    )
+
+    # Semantic identity searches
+    identity_queries = [
+        "The speaker introduces themselves and says their name.",
+        "The presenter tells the audience who they are.",
+        "The host introduces the guest and interviewer.",
+        "A person says their name and role in the video.",
+        "The interviewer asks questions to the guest.",
+        "The guest responds to the interviewer's questions.",
+        "The speaker introduces themselves in Hindi or Hinglish."
+    ]
+
+    for query in identity_queries:
+
+        results = vector_store.similarity_search(
+            query,
+            k=3
+        )
+
+        candidates.extend(results)
+
+    # Actual user question
+    candidates.extend(
+        vector_store.similarity_search(
+            question,
+            k=5
+        )
+    )
+
+    candidates = deduplicate_documents(candidates)
+
+    return candidates[:15]
+
+
+# --------------------------------------------------
+# FORMAT TRANSCRIPT CONTEXT
+# --------------------------------------------------
+
+def format_docs(documents):
+
+    formatted = []
+
+    for document in documents:
+
+        start = format_timestamp(
+            document.metadata.get("start", 0)
+        )
+
+        end = format_timestamp(
+            document.metadata.get("end", 0)
+        )
+
+        formatted.append(
+            f"[Timestamp: {start} - {end}]\n"
+            f"{document.page_content}"
+        )
+
+    return "\n\n".join(formatted)
+
+
+# --------------------------------------------------
+# FORMAT VIDEO METADATA
+# --------------------------------------------------
+
+def format_metadata(video_id):
+
+    metadata = video_metadata.get(video_id, {})
+
+    title = metadata.get("title") or "Not provided"
+    channel = metadata.get("channel_name") or "Not provided"
+
+    return (
+        f"Video ID: {video_id}\n"
+        f"Video title: {title}\n"
+        f"Channel name: {channel}"
+    )
+
+
+# --------------------------------------------------
+# PROCESS VIDEO
+# --------------------------------------------------
+
+def process_video(
+    video_id,
+    title=None,
+    channel_name=None
+):
+
+    print(f"\nProcessing video: {video_id}")
 
     segments = extract_transcript(video_id)
 
     documents = create_timestamped_documents(segments)
 
     if not documents:
-        raise ValueError("No transcript chunks were generated.")
+        raise ValueError("No transcript chunks were created.")
 
     vector_store = FAISS.from_documents(
         documents,
@@ -186,70 +486,119 @@ def process_video(video_id: str):
     )
 
     video_stores[video_id] = vector_store
+    video_documents[video_id] = documents
 
-    print("Video processed successfully!")
+    video_metadata[video_id] = {
+        "title": title,
+        "channel_name": channel_name
+    }
+
+    print("\n========== VIDEO PROCESSING ==========")
     print("Video ID:", video_id)
+    print("Title:", title)
+    print("Channel:", channel_name)
+    print("Transcript segments:", len(segments))
     print("Total chunks:", len(documents))
+    print("======================================\n")
 
     return {
-        "message": "Video processing completed",
         "video_id": video_id,
-        "status": "processed",
-        "chunks": len(documents)
+        "chunks": len(documents),
+        "message": "Video processed successfully."
     }
 
 
-def format_docs(docs):
-    """
-    Include timestamps with each retrieved transcript chunk.
-    """
+# --------------------------------------------------
+# ASK QUESTION
+# --------------------------------------------------
 
-    formatted_documents = []
-
-    for doc in docs:
-        start = doc.metadata.get("start", 0)
-        end = doc.metadata.get("end", start)
-
-        start_time = format_timestamp(start)
-        end_time = format_timestamp(end)
-
-        formatted_documents.append(
-            f"[Timestamp: {start_time} - {end_time}]\n"
-            f"{doc.page_content}"
-        )
-
-    return "\n\n".join(formatted_documents)
-
-
-def ask_question(video_id: str, question: str):
-    """
-    Retrieve relevant timestamped chunks and generate an answer.
-    """
+def ask_question(video_id, question):
 
     if video_id not in video_stores:
         raise ValueError(
-            "Video has not been processed. Please process it first."
+            "Video has not been processed yet."
         )
 
     vector_store = video_stores[video_id]
 
-    retriever = vector_store.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 6}
+    metadata = format_metadata(video_id)
+
+    # ----------------------------------------------
+    # TWO-PASS RAG FOR SPEAKER QUESTIONS
+    # ----------------------------------------------
+
+    if is_speaker_question(question):
+
+        print("\n========== TWO-PASS RAG ==========")
+
+        identity_documents = retrieve_identity_context(
+            vector_store,
+            video_documents[video_id],
+            question
+        )
+
+        identity_context = format_docs(
+            identity_documents
+        )
+
+        print(
+            "Identity evidence chunks:",
+            len(identity_documents)
+        )
+
+        # PASS 1: Analyze identities and roles
+        identity_chain = (
+            identity_prompt
+            | llm
+            | StrOutputParser()
+        )
+
+        identity_analysis = identity_chain.invoke({
+            "context": identity_context,
+            "metadata": metadata
+        })
+
+        print("\nPASS 1 - IDENTITY ANALYSIS:")
+        print(identity_analysis)
+
+        # PASS 2: Generate final answer
+        answer_chain = (
+            answer_prompt
+            | llm
+            | StrOutputParser()
+        )
+
+        answer = answer_chain.invoke({
+            "question": question,
+            "context": identity_context,
+            "metadata": metadata,
+            "identity_analysis": identity_analysis
+        })
+
+        print("\nPASS 2 - FINAL ANSWER:")
+        print(answer)
+
+        print("=================================\n")
+
+        return answer
+
+    # ----------------------------------------------
+    # NORMAL ONE-PASS RAG
+    # ----------------------------------------------
+
+    retrieved_documents = vector_store.similarity_search(
+        question,
+        k=8
     )
 
-    parallel_chain = RunnableParallel({
-        "context": retriever | RunnableLambda(format_docs),
-        "question": RunnablePassthrough()
+    context = format_docs(retrieved_documents)
+
+    chain = normal_prompt | llm | StrOutputParser()
+
+    answer = chain.invoke({
+        "context": context,
+        "question": question,
+        "metadata": metadata
     })
-
-    main_chain = (
-        parallel_chain
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    answer = main_chain.invoke(question)
 
     return answer
