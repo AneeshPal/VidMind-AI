@@ -2,24 +2,48 @@
 from youtube_transcript_api import YouTubeTranscriptApi
 
 
-def extract_transcript(video_id: str) -> str:
+def extract_transcript(video_id: str):
     """
-    Extracts the English transcript of a YouTube video.
+    Extract YouTube transcript while preserving timestamps.
+
+    Returns:
+        A list of dictionaries containing:
+        - text
+        - start
+        - duration
     """
 
     api = YouTubeTranscriptApi()
 
-    transcript = api.fetch(
-        video_id,
-        languages=["en"]
-    )
+    try:
+        transcript = api.fetch(
+            video_id,
+            languages=["en", "hi"]
+        )
 
-    transcript_text = " ".join(
-        snippet.text
-        for snippet in transcript.snippets
-    )
+    except Exception as error:
+        raise ValueError(
+            f"Unable to extract transcript for video {video_id}: {error}"
+        )
 
-    if not transcript_text.strip():
+    transcript_segments = []
+
+    for snippet in transcript.snippets:
+        text = snippet.text.strip()
+
+        if not text:
+            continue
+
+        transcript_segments.append({
+            "text": text,
+            "start": float(snippet.start),
+            "duration": float(snippet.duration)
+        })
+
+    if not transcript_segments:
         raise ValueError("Transcript is empty.")
 
-    return transcript_text
+    print("Transcript extracted successfully!")
+    print("Total transcript segments:", len(transcript_segments))
+
+    return transcript_segments
