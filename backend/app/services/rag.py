@@ -11,6 +11,13 @@ from langchain_community.vectorstores import FAISS
 
 from app.services.transcript import extract_transcript
 
+from app.services.storage import (
+    get_video_cache_path,
+    save_video_metadata,
+    load_video_metadata,
+    cache_exists
+)
+
 
 # ==================================================
 # GLOBAL STORAGE
@@ -329,9 +336,7 @@ def split_into_batches(items, batch_size):
 def create_transcript_documents(transcript_segments):
     """
     Combine individual transcript segments into larger
-    chronological documents.
-
-    Each document contains timestamped transcript text.
+    chronological documents while preserving timestamps.
     """
 
     documents = []
@@ -354,10 +359,8 @@ def create_transcript_documents(transcript_segments):
         end = start + duration
 
         timestamp = timestamp_string(start)
-
         line = f"[{timestamp}] {text}"
 
-        # Flush the current document before exceeding target size.
         if current_lines and current_length + len(line) > CHUNK_SIZE:
 
             documents.append(
@@ -383,7 +386,6 @@ def create_transcript_documents(transcript_segments):
         current_length += len(line) + 1
         chunk_end = end
 
-    # Save remaining transcript text.
     if current_lines:
         documents.append(
             Document(
@@ -396,7 +398,6 @@ def create_transcript_documents(transcript_segments):
             )
         )
 
-    # Assign chronological indices.
     for index, document in enumerate(documents):
         document.metadata["chunk_index"] = index
 
@@ -441,6 +442,7 @@ def expand_search_queries(question):
         })
 
         for line in result.splitlines():
+
             cleaned = re.sub(
                 r"^\s*[-*\d.)]+\s*",
                 "",
@@ -465,9 +467,6 @@ def tokenize(text):
 
 
 def keyword_search(documents, query, limit=8):
-    """
-    Lightweight BM25-style keyword ranking.
-    """
 
     query_terms = tokenize(query)
 
@@ -615,7 +614,11 @@ def hybrid_retrieval(video_id, question, limit=RETRIEVAL_LIMIT):
 # CONTEXT EXPANSION
 # ==================================================
 
-def expand_with_neighbors(video_id, retrieved_docs, window=NEIGHBOR_WINDOW):
+def expand_with_neighbors(
+    video_id,
+    retrieved_docs,
+    window=NEIGHBOR_WINDOW
+):
 
     documents = video_documents[video_id]
 
@@ -643,6 +646,68 @@ def expand_with_neighbors(video_id, retrieved_docs, window=NEIGHBOR_WINDOW):
 
 
 # ==================================================
+# PERSISTENT FAISS CACHE
+# ==================================================
+
+def load_cached_video(video_id):
+    """
+    Load a previously saved FAISS index and documents.
+    """
+
+    if not cache_exists(video_id):
+        return False
+
+    try:
+        cache_path = get_video_cache_path(video_id)
+
+        vector_store = FAISS.load_local(
+            str(cache_path),
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+
+        documents = []
+
+        for doc_id in vector_store.index_to_docstore_id.values():
+
+            document = vector_store.docstore.search(doc_id)
+
+            if isinstance(document, Document):
+                documents.append(document)
+
+        documents.sort(
+            key=lambda doc: doc.metadata.get("chunk_index", 0)
+        )
+
+        if not documents:
+            print("Cache contains no documents.")
+            return False
+
+        metadata = load_video_metadata(video_id)
+
+        video_stores[video_id] = vector_store
+        video_documents[video_id] = documents
+        video_metadata[video_id] = metadata
+
+        print("\n========== CACHE LOADED ==========")
+        print("Video ID:", video_id)
+        print("Cached chunks:", len(documents))
+        print("==================================\n")
+
+        return True
+
+    except Exception as error:
+        print("Cache loading failed:", repr(error))
+
+        # Do not leave partially loaded data in memory.
+        video_stores.pop(video_id, None)
+        video_documents.pop(video_id, None)
+        video_metadata.pop(video_id, None)
+
+        return False
+
+
+# ==================================================
 # TRANSCRIPT PROCESSING
 # ==================================================
 
@@ -653,13 +718,62 @@ def process_video(video_id, title=None, channel_name=None):
     print("Title:", title)
     print("Channel:", channel_name)
 
-    # Extract transcript.
+    # 1. Check in-memory cache.
+    if video_id in video_stores:
+
+        print("Video already loaded in memory.")
+
+        metadata = video_metadata.get(video_id, {})
+
+        if title:
+            metadata["title"] = title
+
+        if channel_name:
+            metadata["channel_name"] = channel_name
+
+        video_metadata[video_id] = metadata
+
+        save_video_metadata(video_id, metadata)
+
+        return {
+            "video_id": video_id,
+            "chunks": len(video_documents[video_id]),
+            "title": metadata.get("title"),
+            "channel_name": metadata.get("channel_name"),
+            "cached": True
+        }
+
+    # 2. Try persistent cache.
+    if load_cached_video(video_id):
+
+        metadata = video_metadata[video_id]
+
+        if title:
+            metadata["title"] = title
+
+        if channel_name:
+            metadata["channel_name"] = channel_name
+
+        save_video_metadata(video_id, metadata)
+
+        print("Using persistent FAISS cache.")
+
+        return {
+            "video_id": video_id,
+            "chunks": len(video_documents[video_id]),
+            "title": metadata.get("title"),
+            "channel_name": metadata.get("channel_name"),
+            "cached": True
+        }
+
+    # 3. Extract transcript if no cache exists.
+    print("No cache found. Extracting transcript...")
+
     transcript_segments = extract_transcript(video_id)
 
     if not transcript_segments:
         raise ValueError("No transcript available for this video.")
 
-    # Save metadata.
     video_metadata[video_id] = {
         "title": title,
         "channel_name": channel_name
@@ -669,7 +783,7 @@ def process_video(video_id, title=None, channel_name=None):
 
     print("Transcript segments:", len(transcript_segments))
 
-    # Combine segments into larger chunks.
+    # 4. Create optimized documents.
     documents = create_transcript_documents(transcript_segments)
 
     if not documents:
@@ -677,7 +791,7 @@ def process_video(video_id, title=None, channel_name=None):
 
     print("Optimized chunks:", len(documents))
 
-    # Build FAISS index.
+    # 5. Generate embeddings and build FAISS.
     vector_store = FAISS.from_documents(
         documents,
         embeddings
@@ -686,7 +800,19 @@ def process_video(video_id, title=None, channel_name=None):
     video_documents[video_id] = documents
     video_stores[video_id] = vector_store
 
-    print("FAISS index created successfully.")
+    # 6. Save FAISS index.
+    cache_path = get_video_cache_path(video_id)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    vector_store.save_local(str(cache_path))
+
+    # 7. Save metadata.
+    save_video_metadata(
+        video_id,
+        video_metadata[video_id]
+    )
+
+    print("FAISS index saved successfully.")
     print("======================================\n")
 
     return {
@@ -694,7 +820,8 @@ def process_video(video_id, title=None, channel_name=None):
         "chunks": len(documents),
         "transcript_segments": len(transcript_segments),
         "title": title,
-        "channel_name": channel_name
+        "channel_name": channel_name,
+        "cached": False
     }
 
 
@@ -906,10 +1033,13 @@ def answer_with_retrieved_context(
 
 def ask_question(video_id, question, chat_history=None):
 
+    # Restore video index if it is not in memory.
     if video_id not in video_stores:
-        raise ValueError(
-            "Video has not been processed. Please process it first."
-        )
+
+        if not load_cached_video(video_id):
+            raise ValueError(
+                "Video has not been processed. Please process it first."
+            )
 
     if not question.strip():
         raise ValueError("Question cannot be empty.")
@@ -919,7 +1049,7 @@ def ask_question(video_id, question, chat_history=None):
     print("\n========== QUESTION ANSWERING ==========")
     print("Original question:", question)
 
-    # Step 1: Rewrite follow-up questions.
+    # 1. Understand follow-up questions.
     standalone_question = rewrite_follow_up_question(
         question,
         chat_history
@@ -927,7 +1057,7 @@ def ask_question(video_id, question, chat_history=None):
 
     print("Standalone question:", standalone_question)
 
-    # Step 2: Full-video analysis when required.
+    # 2. Full-video analysis when required.
     global_intent = detect_global_question(standalone_question)
 
     if global_intent == "summary":
@@ -942,7 +1072,7 @@ def ask_question(video_id, question, chat_history=None):
         print("Using full-transcript people identification.")
         return identify_people(video_id)
 
-    # Step 3: Hybrid retrieval for dynamic questions.
+    # 3. Hybrid retrieval for dynamic questions.
     print("Using hybrid retrieval.")
 
     retrieved_docs = hybrid_retrieval(
@@ -956,7 +1086,7 @@ def ask_question(video_id, question, chat_history=None):
             "to answer that question reliably."
         )
 
-    # Step 4: Add neighboring context.
+    # 4. Add neighboring context.
     expanded_docs = expand_with_neighbors(
         video_id,
         retrieved_docs
@@ -965,7 +1095,7 @@ def ask_question(video_id, question, chat_history=None):
     print("Retrieved chunks:", len(retrieved_docs))
     print("Chunks after context expansion:", len(expanded_docs))
 
-    # Step 5: Generate grounded answer.
+    # 5. Generate grounded answer.
     answer = answer_with_retrieved_context(
         video_id=video_id,
         question=question,
