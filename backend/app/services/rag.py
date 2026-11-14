@@ -34,15 +34,48 @@ llm = ChatOpenAI(
 
 
 # --------------------------------------------------
+# CONVERSATION QUESTION REWRITING
+# --------------------------------------------------
+
+question_rewrite_prompt = ChatPromptTemplate.from_template("""
+You are a question-rewriting assistant for VidMind,
+an AI assistant that answers questions about YouTube videos.
+
+Your task is to convert the user's latest question into
+a standalone question that can be understood without
+the previous conversation.
+
+CONVERSATION HISTORY:
+{chat_history}
+
+LATEST USER QUESTION:
+{question}
+
+RULES:
+
+1. Use conversation history to resolve references such as:
+   he, she, they, it, this, that, his, her and them.
+2. Preserve the original meaning and intent.
+3. Do not answer the question.
+4. Do not add facts that are not present in the conversation.
+5. If the latest question is already standalone, keep it
+   essentially unchanged.
+6. If the conversation does not provide enough information
+   to resolve a reference, preserve the ambiguity.
+7. Return only the rewritten question.
+""")
+
+
+# --------------------------------------------------
 # PASS 1: SPEAKER AND ROLE ANALYSIS
 # --------------------------------------------------
 
 identity_prompt = ChatPromptTemplate.from_template("""
 You are an evidence analyst for VidMind, a YouTube video assistant.
 
-Your task is to analyze the provided transcript excerpts and video metadata.
+Analyze the provided transcript excerpts and video metadata.
 
-Identify the people involved in the video and their roles.
+Identify the people involved and their possible roles.
 
 Possible roles:
 - Host
@@ -57,32 +90,28 @@ Possible roles:
 IMPORTANT RULES:
 
 1. Distinguish the person speaking from the person being discussed.
-2. Distinguish a host introducing a guest from the guest introducing themselves.
-3. A sentence such as:
-   "Sam Altman, welcome to the show"
-   means someone is welcoming Sam Altman.
-   It does NOT mean Sam Altman introduced himself.
-4. A sentence such as:
-   "Hi, I am Sam Altman"
-   is a self-introduction.
-5. Use conversational clues to identify who asks questions and who answers.
-6. A video title or channel name can provide clues, but it is not
-   transcript evidence.
-7. Do not assume that the channel owner is always the interviewer.
-8. Names may appear in Hindi, English, or Hinglish.
-9. Transcripts may contain speech recognition errors.
-10. Never invent names or roles.
+2. Distinguish a host introducing a guest from the guest
+   introducing themselves.
+3. "Sam Altman, welcome to the show" does NOT mean
+   Sam Altman introduced himself.
+4. "Hi, I am Sam Altman" is a self-introduction.
+5. Use conversational clues to identify who asks questions
+   and who answers.
+6. A title or channel name can provide clues, but it is
+   not transcript evidence.
+7. Do not assume the channel owner is always the interviewer.
+8. Understand Hindi, English and Hinglish.
+9. Never invent names or roles.
 
 For every identified person, provide:
-
 - Name
 - Possible role
-- Evidence from transcript
+- Transcript evidence
 - Timestamp
 - Evidence source: Transcript or Metadata
-- Confidence: High, Medium, or Low
+- Confidence: High, Medium or Low
 
-Also answer these separately:
+Also answer:
 
 A. Who appears to be the host/interviewer?
 B. Who appears to be the guest/main speaker?
@@ -90,7 +119,7 @@ C. Does the guest explicitly introduce themselves?
 D. Does the host introduce the guest?
 E. Which roles remain uncertain?
 
-If the transcript does not establish a role, say so.
+If evidence is insufficient, say so.
 
 VIDEO METADATA:
 {metadata}
@@ -103,15 +132,22 @@ Return a clear, structured analysis.
 
 
 # --------------------------------------------------
-# PASS 2: FINAL ANSWER
+# PASS 2: FINAL SPEAKER ANSWER
 # --------------------------------------------------
 
 answer_prompt = ChatPromptTemplate.from_template("""
 You are VidMind, an intelligent YouTube video assistant.
 
-Answer the user's question using the transcript context and speaker analysis.
+Answer the user's latest question using:
+- Transcript evidence
+- Video metadata
+- Speaker analysis
+- Previous conversation, when relevant
 
-USER QUESTION:
+PREVIOUS CONVERSATION:
+{chat_history}
+
+USER'S ORIGINAL QUESTION:
 {question}
 
 VIDEO METADATA:
@@ -125,22 +161,22 @@ SPEAKER ANALYSIS:
 
 IMPORTANT RULES:
 
-1. Understand English, Hindi, and Hinglish.
-2. Never invent names, identities, or events.
+1. Understand English, Hindi and Hinglish.
+2. Never invent names, identities or events.
 3. Do not confuse the host with the guest.
-4. Do not confuse a host's introduction with a guest's self-introduction.
-5. If someone says "Welcome, Sam Altman", the person being welcomed
-   is Sam Altman. This is not proof that Sam introduced himself.
-6. Use transcript evidence to establish what was actually said.
-7. Metadata may help identify people, but clearly distinguish it
+4. Do not confuse a host's introduction with a guest's
+   self-introduction.
+5. Use transcript evidence to establish what was said.
+6. Metadata may help identify people, but distinguish it
    from transcript evidence.
-8. If the interviewer is identified only through metadata,
+7. If a role is identified only through metadata,
    explicitly mention that.
-9. If evidence is insufficient, say that the identity or role
-   cannot be confirmed.
-10. Include timestamps when transcript evidence supports the answer.
-11. Answer the actual question directly.
-12. Do not provide the entire speaker analysis unless requested.
+8. If evidence is insufficient, say so.
+9. Include timestamps when transcript evidence supports them.
+10. Answer the original question directly.
+11. Use conversation history to understand follow-up questions.
+12. Do not present the entire speaker analysis unless requested.
+13. Do not treat previous assistant answers as transcript evidence.
 
 FINAL ANSWER:
 """)
@@ -151,17 +187,13 @@ FINAL ANSWER:
 # --------------------------------------------------
 
 normal_prompt = ChatPromptTemplate.from_template("""
-You are VidMind, an AI assistant that answers questions about YouTube videos.
+You are VidMind, an AI assistant that answers questions
+about YouTube videos.
 
-Answer using only the transcript context provided.
+Answer using the transcript context provided.
 
-Rules:
-1. Understand English, Hindi, and Hinglish.
-2. Account for possible speech-to-text errors.
-3. Never invent facts.
-4. If the answer is unavailable in the transcript, say so.
-5. Include relevant timestamps when useful.
-6. Keep the answer direct and conversational.
+PREVIOUS CONVERSATION:
+{chat_history}
 
 VIDEO:
 {metadata}
@@ -169,8 +201,21 @@ VIDEO:
 TRANSCRIPT:
 {context}
 
-QUESTION:
+USER'S ORIGINAL QUESTION:
 {question}
+
+RULES:
+
+1. Understand English, Hindi and Hinglish.
+2. Account for possible speech-to-text errors.
+3. Never invent facts.
+4. If the answer is unavailable in the transcript, say so.
+5. Include relevant timestamps when useful.
+6. Keep the answer direct and conversational.
+7. Use previous conversation to understand follow-up questions.
+8. Previous assistant answers are conversational context,
+   not proof of facts in the video.
+9. Base factual claims about the video on transcript evidence.
 
 ANSWER:
 """)
@@ -195,6 +240,70 @@ def format_timestamp(seconds):
         )
 
     return f"{minutes:02d}:{remaining_seconds:02d}"
+
+
+# --------------------------------------------------
+# CONVERSATION HISTORY FORMATTER
+# --------------------------------------------------
+
+def format_chat_history(chat_history):
+    if not chat_history:
+        return "No previous conversation."
+
+    formatted = []
+
+    for message in chat_history[-10:]:
+        role = message.get("role", "user")
+        content = str(message.get("content", "")).strip()
+
+        if not content:
+            continue
+
+        speaker = "User" if role == "user" else "VidMind"
+
+        formatted.append(
+            f"{speaker}: {content}"
+        )
+
+    return "\n".join(formatted) or "No previous conversation."
+
+
+# --------------------------------------------------
+# REWRITE FOLLOW-UP QUESTIONS
+# --------------------------------------------------
+
+def rewrite_question(question, chat_history):
+    """
+    Convert a follow-up question into a standalone question
+    using recent conversation history.
+    """
+
+    if not chat_history:
+        return question
+
+    history = format_chat_history(chat_history)
+
+    chain = (
+        question_rewrite_prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    rewritten_question = chain.invoke({
+        "chat_history": history,
+        "question": question
+    }).strip()
+
+    # Prevent an empty model response from breaking retrieval.
+    if not rewritten_question:
+        return question
+
+    print("\n========== QUESTION REWRITING ==========")
+    print("Original question:", question)
+    print("Rewritten question:", rewritten_question)
+    print("========================================\n")
+
+    return rewritten_question
 
 
 # --------------------------------------------------
@@ -379,12 +488,10 @@ def retrieve_identity_context(
 
     candidates = []
 
-    # Search the full transcript for possible introductions
     candidates.extend(
         find_identity_chunks(all_documents)
     )
 
-    # Semantic identity searches
     identity_queries = [
         "The speaker introduces themselves and says their name.",
         "The presenter tells the audience who they are.",
@@ -404,7 +511,6 @@ def retrieve_identity_context(
 
         candidates.extend(results)
 
-    # Actual user question
     candidates.extend(
         vector_store.similarity_search(
             question,
@@ -512,29 +618,51 @@ def process_video(
 # ASK QUESTION
 # --------------------------------------------------
 
-def ask_question(video_id, question):
+def ask_question(
+    video_id,
+    question,
+    chat_history=None
+):
 
     if video_id not in video_stores:
         raise ValueError(
             "Video has not been processed yet."
         )
 
+    chat_history = chat_history or []
+
+    # Keep only the latest 10 conversation messages.
+    chat_history = chat_history[-10:]
+
     vector_store = video_stores[video_id]
 
     metadata = format_metadata(video_id)
+    formatted_history = format_chat_history(chat_history)
 
     # ----------------------------------------------
-    # TWO-PASS RAG FOR SPEAKER QUESTIONS
+    # STEP 1: REWRITE QUESTION
     # ----------------------------------------------
 
-    if is_speaker_question(question):
+    search_question = rewrite_question(
+        question,
+        chat_history
+    )
+
+    # ----------------------------------------------
+    # STEP 2: TWO-PASS RAG FOR SPEAKER QUESTIONS
+    # ----------------------------------------------
+
+    if (
+        is_speaker_question(question)
+        or is_speaker_question(search_question)
+    ):
 
         print("\n========== TWO-PASS RAG ==========")
 
         identity_documents = retrieve_identity_context(
             vector_store,
             video_documents[video_id],
-            question
+            search_question
         )
 
         identity_context = format_docs(
@@ -546,7 +674,6 @@ def ask_question(video_id, question):
             len(identity_documents)
         )
 
-        # PASS 1: Analyze identities and roles
         identity_chain = (
             identity_prompt
             | llm
@@ -561,7 +688,6 @@ def ask_question(video_id, question):
         print("\nPASS 1 - IDENTITY ANALYSIS:")
         print(identity_analysis)
 
-        # PASS 2: Generate final answer
         answer_chain = (
             answer_prompt
             | llm
@@ -572,7 +698,8 @@ def ask_question(video_id, question):
             "question": question,
             "context": identity_context,
             "metadata": metadata,
-            "identity_analysis": identity_analysis
+            "identity_analysis": identity_analysis,
+            "chat_history": formatted_history
         })
 
         print("\nPASS 2 - FINAL ANSWER:")
@@ -583,11 +710,11 @@ def ask_question(video_id, question):
         return answer
 
     # ----------------------------------------------
-    # NORMAL ONE-PASS RAG
+    # STEP 3: NORMAL CONTEXT-AWARE RAG
     # ----------------------------------------------
 
     retrieved_documents = vector_store.similarity_search(
-        question,
+        search_question,
         k=8
     )
 
@@ -598,7 +725,8 @@ def ask_question(video_id, question):
     answer = chain.invoke({
         "context": context,
         "question": question,
-        "metadata": metadata
+        "metadata": metadata,
+        "chat_history": formatted_history
     })
 
     return answer

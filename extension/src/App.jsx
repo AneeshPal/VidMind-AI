@@ -83,22 +83,43 @@ function renderMessageContent(content, onTimestampClick) {
   return parts;
 }
 
+
 function App() {
+
+  // ----------------------------------------------
+  // VIDEO STATE
+  // ----------------------------------------------
+
   const [video, setVideo] = useState(null);
+
   const [processingStatus, setProcessingStatus] = useState("idle");
   const [processingError, setProcessingError] = useState("");
 
-  const [messages, setMessages] = useState([]);
+  // ----------------------------------------------
+  // CONVERSATION STATE
+  // ----------------------------------------------
+
+  // Each video gets its own conversation.
+  const [conversations, setConversations] = useState({});
+
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
+
+  // Get messages for the currently active video.
+  const messages = video
+    ? conversations[video.videoId] || []
+    : [];
 
   const lastRequestedVideoId = useRef(null);
   const activeVideoId = useRef(null);
 
-  // Process a newly detected YouTube video.
-  
-  // Process a newly detected YouTube video.
+
+  // ----------------------------------------------
+  // PROCESS VIDEO
+  // ----------------------------------------------
+
   const processVideo = useCallback(async (videoInfo) => {
+
     if (!videoInfo?.videoId) return;
 
     const videoId = videoInfo.videoId;
@@ -111,12 +132,12 @@ function App() {
     activeVideoId.current = videoId;
 
     setVideo(videoInfo);
-    setMessages([]);
     setQuestion("");
     setProcessingError("");
     setProcessingStatus("processing");
 
     try {
+
       const response = await fetch(
         `${API_BASE_URL}/process-video`,
         {
@@ -153,6 +174,7 @@ function App() {
       });
 
     } catch (error) {
+
       if (activeVideoId.current !== videoId) return;
 
       console.error("Processing error:", error);
@@ -162,15 +184,20 @@ function App() {
       setProcessingStatus("error");
       setProcessingError(error.message);
     }
+
   }, []);
 
-  // Handle detected video changes.
+
+  // ----------------------------------------------
+  // HANDLE VIDEO CHANGES
+  // ----------------------------------------------
+
   const handleVideoUpdate = useCallback((videoInfo) => {
+
     if (!videoInfo) {
       setVideo(null);
       setProcessingStatus("idle");
       setProcessingError("");
-      setMessages([]);
 
       activeVideoId.current = null;
       lastRequestedVideoId.current = null;
@@ -181,38 +208,55 @@ function App() {
     setVideo(videoInfo);
 
     if (activeVideoId.current !== videoInfo.videoId) {
+
       activeVideoId.current = videoInfo.videoId;
       lastRequestedVideoId.current = null;
 
-      setMessages([]);
+      setQuestion("");
       setProcessingError("");
       setProcessingStatus("idle");
 
+      // IMPORTANT:
+      // Do not clear conversations here.
+      // Previous conversations remain saved in React state.
+
       processVideo(videoInfo);
     }
+
   }, [processVideo]);
 
-  // Detect current YouTube video and listen for updates.
+
+  // ----------------------------------------------
+  // DETECT CURRENT YOUTUBE VIDEO
+  // ----------------------------------------------
+
   useEffect(() => {
+
     const chromeApi = globalThis.chrome;
 
     if (!chromeApi?.runtime?.onMessage) {
       setProcessingError(
         "Please open VidMind through the Chrome extension."
       );
+
       return;
     }
 
     const handleMessage = (message) => {
+
       if (message.type === "YOUTUBE_VIDEO_CHANGED") {
         handleVideoUpdate(message.payload);
       }
+
     };
 
     chromeApi.runtime.onMessage.addListener(handleMessage);
 
+
     async function detectCurrentVideo() {
+
       try {
+
         const [tab] = await chromeApi.tabs.query({
           active: true,
           currentWindow: true
@@ -242,6 +286,7 @@ function App() {
         handleVideoUpdate(videoInfo);
 
       } catch (error) {
+
         console.error("Video detection failed:", error);
 
         setVideo(null);
@@ -258,18 +303,30 @@ function App() {
     return () => {
       chromeApi.runtime.onMessage.removeListener(handleMessage);
     };
+
   }, [handleVideoUpdate]);
 
-  // Retry processing.
+
+  // ----------------------------------------------
+  // RETRY VIDEO PROCESSING
+  // ----------------------------------------------
+
   const retryProcessing = () => {
+
     if (!video) return;
 
     lastRequestedVideoId.current = null;
+
     processVideo(video);
   };
 
-  // Find a YouTube tab using its actual video ID.
+
+  // ----------------------------------------------
+  // FIND YOUTUBE TAB
+  // ----------------------------------------------
+
   const findYouTubeTab = async (videoId) => {
+
     if (!videoId) {
       console.error("VidMind: Video ID is missing.");
       return null;
@@ -280,21 +337,26 @@ function App() {
     const tabs = await chromeApi.tabs.query({});
 
     const youtubeTabs = tabs.filter((tab) => {
+
       if (!tab.url) return false;
 
       try {
+
         const url = new URL(tab.url);
 
         return (
           url.hostname === "youtube.com" ||
           url.hostname.endsWith(".youtube.com")
         );
+
       } catch {
         return false;
       }
+
     });
 
     const matchingTab = youtubeTabs.find((tab) => {
+
       const url = new URL(tab.url);
 
       let currentVideoId = null;
@@ -306,9 +368,11 @@ function App() {
       }
 
       return currentVideoId === videoId;
+
     });
 
     if (matchingTab) {
+
       console.log(
         "VidMind: Matching YouTube tab found:",
         matchingTab.url
@@ -325,14 +389,19 @@ function App() {
     return null;
   };
 
-  // Jump to a timestamp.
+
+  // ----------------------------------------------
+  // TIMESTAMP NAVIGATION
+  // ----------------------------------------------
+
   const handleTimestampClick = async (seconds) => {
+
     console.log("VidMind timestamp clicked:", seconds);
 
     try {
+
       const chromeApi = globalThis.chrome;
 
-      // IMPORTANT: Pass the actual video ID, not chromeApi.
       const videoId = activeVideoId.current;
 
       const youtubeTab = await findYouTubeTab(videoId);
@@ -342,8 +411,9 @@ function App() {
         return;
       }
 
-      // First attempt: seek using the content script.
+      // First attempt: seek using content script.
       try {
+
         const result = await chromeApi.tabs.sendMessage(
           youtubeTab.id,
           {
@@ -364,6 +434,7 @@ function App() {
         );
 
       } catch (messageError) {
+
         console.warn(
           "Content script communication failed:",
           messageError
@@ -373,10 +444,14 @@ function App() {
       // Fallback: navigate to the same video at the requested time.
       const url = new URL(youtubeTab.url);
 
-      if (url.pathname === "/watch") {
-        url.searchParams.set("t", `${Math.floor(seconds)}s`);
-      } else if (url.pathname.startsWith("/shorts/")) {
-        url.searchParams.set("t", `${Math.floor(seconds)}s`);
+      if (
+        url.pathname === "/watch" ||
+        url.pathname.startsWith("/shorts/")
+      ) {
+        url.searchParams.set(
+          "t",
+          `${Math.floor(seconds)}s`
+        );
       }
 
       await chromeApi.tabs.update(youtubeTab.id, {
@@ -386,12 +461,18 @@ function App() {
       console.log("VidMind URL fallback:", url.toString());
 
     } catch (error) {
+
       console.error("Timestamp navigation failed:", error);
     }
   };
 
-  // Send question to backend.
+
+  // ----------------------------------------------
+  // SEND QUESTION WITH CONVERSATION HISTORY
+  // ----------------------------------------------
+
   const handleSubmit = async (event) => {
+
     event.preventDefault();
 
     const userQuestion = question.trim();
@@ -405,20 +486,36 @@ function App() {
       return;
     }
 
-    setMessages((previous) => [
+    const requestedVideoId = video.videoId;
+
+    // Capture previous messages BEFORE adding the new question.
+    const previousMessages = conversations[requestedVideoId] || [];
+
+    // Send only the latest 10 previous messages.
+    const chatHistory = previousMessages.slice(-10).map(
+      (message) => ({
+        role: message.role,
+        content: message.content
+      })
+    );
+
+    // Add user's new question to this video's conversation.
+    setConversations((previous) => ({
       ...previous,
-      {
-        role: "user",
-        content: userQuestion
-      }
-    ]);
+      [requestedVideoId]: [
+        ...(previous[requestedVideoId] || []),
+        {
+          role: "user",
+          content: userQuestion
+        }
+      ]
+    }));
 
     setQuestion("");
     setAsking(true);
 
-    const requestedVideoId = video.videoId;
-
     try {
+
       const response = await fetch(
         `${API_BASE_URL}/ask`,
         {
@@ -428,7 +525,8 @@ function App() {
           },
           body: JSON.stringify({
             video_id: requestedVideoId,
-            question: userQuestion
+            question: userQuestion,
+            chat_history: chatHistory
           })
         }
       );
@@ -445,39 +543,74 @@ function App() {
         return;
       }
 
-      setMessages((previous) => [
+      // Add assistant answer to the same video's conversation.
+      setConversations((previous) => ({
         ...previous,
-        {
-          role: "assistant",
-          content: data.answer
-        }
-      ]);
+        [requestedVideoId]: [
+          ...(previous[requestedVideoId] || []),
+          {
+            role: "assistant",
+            content: data.answer
+          }
+        ]
+      }));
 
     } catch (error) {
+
       console.error("Question error:", error);
 
       if (activeVideoId.current !== requestedVideoId) {
         return;
       }
 
-      setMessages((previous) => [
+      setConversations((previous) => ({
         ...previous,
-        {
-          role: "assistant",
-          content: `Sorry, something went wrong: ${error.message}`
-        }
-      ]);
+        [requestedVideoId]: [
+          ...(previous[requestedVideoId] || []),
+          {
+            role: "assistant",
+            content: `Sorry, something went wrong: ${error.message}`
+          }
+        ]
+      }));
 
     } finally {
+
       setAsking(false);
     }
   };
+
+
+  // ----------------------------------------------
+  // CLEAR CURRENT VIDEO CONVERSATION
+  // ----------------------------------------------
+
+  const clearConversation = () => {
+
+    if (!video) return;
+
+    setConversations((previous) => ({
+      ...previous,
+      [video.videoId]: []
+    }));
+
+    console.log(
+      "VidMind conversation cleared:",
+      video.videoId
+    );
+  };
+
+
+  // ----------------------------------------------
+  // UI
+  // ----------------------------------------------
 
   return (
     <div className="app">
 
       {/* Header */}
       <header className="header">
+
         <div className="logo">V</div>
 
         <div className="brand">
@@ -486,18 +619,22 @@ function App() {
         </div>
 
         <div className="header-badge">AI</div>
+
       </header>
+
 
       {/* Video information */}
       <section className="video-section">
 
         {video ? (
           <>
+
             <div className="video-title">
               {video.title}
             </div>
 
             <div className="video-metadata">
+
               {video.channelName && (
                 <span>{video.channelName}</span>
               )}
@@ -511,9 +648,11 @@ function App() {
               {video.viewCount && (
                 <span>{video.viewCount}</span>
               )}
+
             </div>
 
             <div className={`status ${processingStatus}`}>
+
               <span className="status-dot"></span>
 
               {processingStatus === "processing" &&
@@ -524,38 +663,57 @@ function App() {
 
               {processingStatus === "error" &&
                 "Processing failed"}
+
             </div>
 
+
             {processingStatus === "error" && (
+
               <div className="error-message">
+
                 <p>{processingError}</p>
 
                 <button onClick={retryProcessing}>
                   Retry processing
                 </button>
+
               </div>
+
             )}
 
+
             {processingStatus === "processing" && (
+
               <p className="processing-text">
                 Extracting transcript and generating embeddings...
               </p>
+
             )}
+
           </>
+
         ) : (
+
           <div className="empty-video">
+
             <h3>No video detected</h3>
+
             <p>Open a YouTube video to start chatting.</p>
+
           </div>
+
         )}
 
       </section>
+
 
       {/* Chat area */}
       <main className="chat-area">
 
         {messages.length === 0 && (
+
           <div className="welcome">
+
             <div className="welcome-icon">✦</div>
 
             <h3>Ask anything about this video</h3>
@@ -564,50 +722,74 @@ function App() {
               I can summarize the video, explain concepts,
               and answer questions using its transcript.
               Click timestamps to jump to relevant moments.
+              I can also understand follow-up questions.
             </p>
 
             {processingStatus === "ready" && (
+
               <div className="suggestion">
                 Try asking: "Can you summarize this video?"
               </div>
+
             )}
+
           </div>
+
         )}
 
+
         {messages.map((message, index) => (
+
           <div
             key={index}
             className={`message ${message.role}`}
           >
+
             <div className="message-label">
               {message.role === "user" ? "You" : "VidMind"}
             </div>
 
             <div className="message-content">
+
               {message.role === "assistant"
                 ? renderMessageContent(
                     message.content,
                     handleTimestampClick
                   )
                 : message.content}
+
             </div>
+
           </div>
+
         ))}
 
+
         {asking && (
+
           <div className="message assistant">
-            <div className="message-label">VidMind</div>
+
+            <div className="message-label">
+              VidMind
+            </div>
 
             <div className="message-content typing">
               Thinking...
             </div>
+
           </div>
+
         )}
 
       </main>
 
+
       {/* Question input */}
-      <form className="chat-input" onSubmit={handleSubmit}>
+      <form
+        className="chat-input"
+        onSubmit={handleSubmit}
+      >
+
         <input
           type="text"
           placeholder={
@@ -617,7 +799,9 @@ function App() {
           }
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
-          disabled={processingStatus !== "ready" || asking}
+          disabled={
+            processingStatus !== "ready" || asking
+          }
         />
 
         <button
@@ -630,7 +814,27 @@ function App() {
         >
           ↑
         </button>
+
       </form>
+
+
+      {/* Clear conversation */}
+      {messages.length > 0 && (
+
+        <div className="conversation-actions">
+
+          <button
+            type="button"
+            onClick={clearConversation}
+            disabled={asking}
+          >
+            Clear conversation
+          </button>
+
+        </div>
+
+      )}
+
 
       <footer className="footer">
         VidMind AI · Answers based on video transcripts

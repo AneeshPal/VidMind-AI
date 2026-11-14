@@ -4,7 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Load environment variables from backend/.env
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,7 +20,10 @@ app = FastAPI(
 )
 
 
-# CORS configuration
+# --------------------------------------------------
+# CORS CONFIGURATION
+# --------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,9 +43,15 @@ class ProcessVideoRequest(BaseModel):
     channel_name: str | None = None
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 class AskRequest(BaseModel):
     video_id: str
     question: str
+    chat_history: list[ChatMessage] = Field(default_factory=list)
 
 
 # --------------------------------------------------
@@ -115,16 +124,39 @@ def process_video_endpoint(request: ProcessVideoRequest):
 @app.post("/ask")
 def ask_endpoint(request: AskRequest):
 
+    if not request.video_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Video ID cannot be empty."
+        )
+
     if not request.question.strip():
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty."
         )
 
+    # Validate message roles and remove empty messages.
+    chat_history = []
+
+    for message in request.chat_history[-10:]:
+        if message.role not in ("user", "assistant"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid chat history role."
+            )
+
+        if message.content.strip():
+            chat_history.append({
+                "role": message.role,
+                "content": message.content.strip()
+            })
+
     try:
         answer = ask_question(
-            request.video_id,
-            request.question
+            video_id=request.video_id,
+            question=request.question,
+            chat_history=chat_history
         )
 
         return {
