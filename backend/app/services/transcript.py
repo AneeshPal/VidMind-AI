@@ -3,27 +3,34 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 
 def extract_transcript(video_id: str):
-    """
-    Extract YouTube transcript while preserving timestamps.
+    if not video_id or video_id.strip() in ("", "string"):
+        raise ValueError(
+            "Invalid YouTube video ID. Please provide an actual video ID."
+        )
 
-    Returns a list of dictionaries containing:
-    - text
-    - start
-    - duration
-    """
+    video_id = video_id.strip()
 
-    api = YouTubeTranscriptApi()
+    print("\n========== TRANSCRIPT EXTRACTION ==========")
+    print("Video ID:", video_id)
 
     try:
+        api = YouTubeTranscriptApi()
         transcript = api.fetch(
             video_id,
             languages=["en", "hi"]
         )
 
     except Exception as error:
+        error_message = str(error)
+
+        print("Transcript extraction failed:", error_message)
+
         raise ValueError(
-            f"Unable to extract transcript for video {video_id}: {error}"
-        )
+            f"Unable to extract transcript for video {video_id}.\n"
+            f"Possible causes include YouTube blocking requests, "
+            f"captions being unavailable, or an invalid video ID.\n"
+            f"Original error: {error_message}"
+        ) from error
 
     transcript_segments = []
 
@@ -42,8 +49,6 @@ def extract_transcript(video_id: str):
     if not transcript_segments:
         raise ValueError("Transcript is empty.")
 
-    print("\n========== TRANSCRIPT EXTRACTION ==========")
-    print("Video ID:", video_id)
     print("Total transcript segments:", len(transcript_segments))
     print("First segment:", transcript_segments[0])
     print("===========================================\n")

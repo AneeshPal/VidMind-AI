@@ -55,6 +55,31 @@ class AskRequest(BaseModel):
 
 
 # --------------------------------------------------
+# VALIDATION HELPER
+# --------------------------------------------------
+
+def validate_video_id(video_id: str):
+    video_id = video_id.strip()
+
+    if not video_id or video_id.lower() == "string":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid video ID. Enter the actual YouTube video ID."
+        )
+
+    if not all(
+        char.isalnum() or char in "_-"
+        for char in video_id
+    ) or len(video_id) != 11:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid YouTube video ID. Expected an 11-character video ID."
+        )
+
+    return video_id
+
+
+# --------------------------------------------------
 # HOME
 # --------------------------------------------------
 
@@ -84,15 +109,14 @@ def health_check():
 @app.post("/process-video")
 def process_video_endpoint(request: ProcessVideoRequest):
 
-    if not request.video_id.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Video ID cannot be empty."
-        )
+    video_id = validate_video_id(request.video_id)
 
     try:
+        print("\n========== VIDEO PROCESSING ==========")
+        print("Received video ID:", video_id)
+
         result = process_video(
-            video_id=request.video_id,
+            video_id=video_id,
             title=request.title,
             channel_name=request.channel_name
         )
@@ -109,7 +133,7 @@ def process_video_endpoint(request: ProcessVideoRequest):
         )
 
     except Exception as error:
-        print("Video processing error:", error)
+        print("Video processing error:", repr(error))
 
         raise HTTPException(
             status_code=500,
@@ -124,11 +148,7 @@ def process_video_endpoint(request: ProcessVideoRequest):
 @app.post("/ask")
 def ask_endpoint(request: AskRequest):
 
-    if not request.video_id.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Video ID cannot be empty."
-        )
+    video_id = validate_video_id(request.video_id)
 
     if not request.question.strip():
         raise HTTPException(
@@ -136,10 +156,10 @@ def ask_endpoint(request: AskRequest):
             detail="Question cannot be empty."
         )
 
-    # Validate message roles and remove empty messages.
     chat_history = []
 
     for message in request.chat_history[-10:]:
+
         if message.role not in ("user", "assistant"):
             raise HTTPException(
                 status_code=400,
@@ -154,13 +174,13 @@ def ask_endpoint(request: AskRequest):
 
     try:
         answer = ask_question(
-            video_id=request.video_id,
-            question=request.question,
+            video_id=video_id,
+            question=request.question.strip(),
             chat_history=chat_history
         )
 
         return {
-            "video_id": request.video_id,
+            "video_id": video_id,
             "question": request.question,
             "answer": answer
         }
@@ -172,7 +192,7 @@ def ask_endpoint(request: AskRequest):
         )
 
     except Exception as error:
-        print("Question answering error:", error)
+        print("Question answering error:", repr(error))
 
         raise HTTPException(
             status_code=500,
