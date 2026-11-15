@@ -1106,3 +1106,92 @@ def ask_question(video_id, question, chat_history=None):
     print("========================================\n")
 
     return answer
+
+
+def ask_question_stream(video_id, question, chat_history=None):
+    """
+    Stream an answer while preserving the existing RAG pipeline.
+    Yields text chunks as they are generated.
+    """
+
+    if video_id not in video_stores:
+        if not load_cached_video(video_id):
+            raise ValueError(
+                "Video has not been processed. Please process it first."
+            )
+
+    if not question.strip():
+        raise ValueError("Question cannot be empty.")
+
+    chat_history = chat_history or []
+
+    print("\n========== STREAMING QUESTION ANSWERING ==========")
+    print("Original question:", question)
+
+    # 1. Rewrite follow-up question.
+    standalone_question = rewrite_follow_up_question(
+        question,
+        chat_history
+    )
+
+    print("Standalone question:", standalone_question)
+
+    # 2. Handle full-video analysis.
+    global_intent = detect_global_question(standalone_question)
+
+    if global_intent == "summary":
+        print("Using full-transcript summary.")
+        yield summarize_video(video_id)
+        return
+
+    if global_intent == "takeaways":
+        print("Using full-transcript takeaway extraction.")
+        yield get_video_takeaways(video_id)
+        return
+
+    if global_intent == "people":
+        print("Using full-transcript people identification.")
+        yield identify_people(video_id)
+        return
+
+    # 3. Hybrid retrieval.
+    print("Using hybrid retrieval.")
+
+    retrieved_docs = hybrid_retrieval(
+        video_id,
+        standalone_question
+    )
+
+    if not retrieved_docs:
+        yield (
+            "I couldn't find relevant transcript evidence "
+            "to answer that question reliably."
+        )
+        return
+
+    # 4. Expand context.
+    expanded_docs = expand_with_neighbors(
+        video_id,
+        retrieved_docs
+    )
+
+    print("Retrieved chunks:", len(retrieved_docs))
+    print("Chunks after context expansion:", len(expanded_docs))
+
+    # 5. Build the existing grounded-answer chain.
+    context = format_docs(expanded_docs)
+
+    chain = answer_prompt | llm | StrOutputParser()
+
+    # 6. Stream generated text.
+    for token in chain.stream({
+        "metadata": format_metadata(video_id),
+        "chat_history": format_chat_history(chat_history),
+        "question": question,
+        "context": context
+    }):
+        if token:
+            yield token
+
+    print("\nStreaming response completed.")
+    print("===================================================\n")

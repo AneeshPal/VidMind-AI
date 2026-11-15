@@ -1,3 +1,4 @@
+
 # Environment variables
 .env
 .env.*
@@ -5,7 +6,7 @@
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 venv/
 .venv/
 
@@ -13,9 +14,8 @@ venv/
 node_modules/
 dist/
 
-# Vector databases
-*.faiss
-*.pkl
+# FAISS / generated data
+backend/data/faiss/
 
 # OS
 .DS_Store

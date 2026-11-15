@@ -780,3 +780,20 @@ button {
     font-size: 8px;
   }
 }
+
+.suggestion {
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.suggestion:hover {
+  opacity: 0.85;
+  transform: translateY(-2px);
+}
+
+.suggestion:focus-visible {
+  outline: 2px solid #a18bff;
+  outline-offset: 3px;
+}

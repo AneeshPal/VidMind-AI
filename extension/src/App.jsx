@@ -3,32 +3,14 @@ import {
   useState,
   useEffect,
   useRef,
-  useCallback,
-  isValidElement,
-  cloneElement
+  useCallback
 } from "react";
 
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
-
-import "highlight.js/styles/github-dark.css";
 import "./App.css";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
-const SUGGESTED_QUESTIONS = [
-  "Summarize this video",
-  "What are the key takeaways?",
-  "Explain the main topic",
-  "Who are the people in this video?"
-];
-
-
-// --------------------------------------------------
-// TIMESTAMP HELPERS
-// --------------------------------------------------
-
+// Convert MM:SS or HH:MM:SS into seconds.
 function timestampToSeconds(timestamp) {
   const parts = timestamp.split(":").map(Number);
 
@@ -41,157 +23,100 @@ function timestampToSeconds(timestamp) {
   }
 
   if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return (
+      parts[0] * 3600 +
+      parts[1] * 60 +
+      parts[2]
+    );
   }
 
   return null;
 }
 
+// Render timestamps as clickable buttons.
+function renderMessageContent(content, onTimestampClick) {
+  const timestampRegex = /\b(?:\d{1,2}:)?\d{1,2}:\d{2}\b/g;
 
-function renderTimestampNodes(nodes, onTimestampClick) {
-  return nodes.map((node, index) => {
-    if (typeof node === "string") {
-      const regex = /\b(?:\d{1,2}:)?\d{1,2}:\d{2}\b/g;
-      const parts = [];
-      let lastIndex = 0;
-      let match;
+  const parts = [];
+  let lastIndex = 0;
+  let match;
+  let key = 0;
 
-      while ((match = regex.exec(node)) !== null) {
-        if (match.index > lastIndex) {
-          parts.push(node.slice(lastIndex, match.index));
-        }
+  while ((match = timestampRegex.exec(content)) !== null) {
+    const timestamp = match[0];
 
-        const timestamp = match[0];
-        const seconds = timestampToSeconds(timestamp);
-
-        if (seconds !== null) {
-          parts.push(
-            <button
-              key={`${index}-${match.index}`}
-              type="button"
-              className="timestamp-button"
-              onClick={() => onTimestampClick(seconds)}
-              title={`Jump to ${timestamp}`}
-            >
-              {timestamp}
-            </button>
-          );
-        }
-
-        lastIndex = regex.lastIndex;
-      }
-
-      if (lastIndex < node.length) {
-        parts.push(node.slice(lastIndex));
-      }
-
-      return <span key={index}>{parts}</span>;
-    }
-
-    if (isValidElement(node) && node.props.children) {
-      return cloneElement(
-        node,
-        {},
-        renderTimestampNodes(
-          Array.isArray(node.props.children)
-            ? node.props.children
-            : [node.props.children],
-          onTimestampClick
-        )
+    if (match.index > lastIndex) {
+      parts.push(
+        <span key={key++}>
+          {content.slice(lastIndex, match.index)}
+        </span>
       );
     }
 
-    return node;
-  });
+    const seconds = timestampToSeconds(timestamp);
+
+    if (seconds !== null) {
+      parts.push(
+        <button
+          key={key++}
+          type="button"
+          className="timestamp-button"
+          onClick={() => onTimestampClick(seconds)}
+          title={`Jump to ${timestamp}`}
+        >
+          {timestamp}
+        </button>
+      );
+    }
+
+    lastIndex = timestampRegex.lastIndex;
+  }
+
+  if (lastIndex < content.length) {
+    parts.push(
+      <span key={key++}>
+        {content.slice(lastIndex)}
+      </span>
+    );
+  }
+
+  return parts;
 }
-
-
-// --------------------------------------------------
-// MARKDOWN MESSAGE
-// --------------------------------------------------
-
-function MarkdownMessage({ content, onTimestampClick }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight]}
-      components={{
-        p: ({ children, ...props }) => (
-          <p {...props}>
-            {renderTimestampNodes(
-              Array.isArray(children) ? children : [children],
-              onTimestampClick
-            )}
-          </p>
-        ),
-
-        li: ({ children, ...props }) => (
-          <li {...props}>
-            {renderTimestampNodes(
-              Array.isArray(children) ? children : [children],
-              onTimestampClick
-            )}
-          </li>
-        ),
-
-        a: ({ children, href, ...props }) => (
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            {...props}
-          >
-            {children}
-          </a>
-        )
-      }}
-    >
-      {content || ""}
-    </ReactMarkdown>
-  );
-}
-
-
-// --------------------------------------------------
-// MAIN APP
-// --------------------------------------------------
 
 function App() {
+  // ----------------------------------------------
+  // VIDEO STATE
+  // ----------------------------------------------
+
   const [video, setVideo] = useState(null);
 
   const [processingStatus, setProcessingStatus] = useState("idle");
   const [processingError, setProcessingError] = useState("");
 
-  // Separate conversation for each video.
+  // ----------------------------------------------
+  // CONVERSATION STATE
+  // ----------------------------------------------
+
+  // Each video gets its own conversation.
   const [conversations, setConversations] = useState({});
 
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
 
-  const lastRequestedVideoId = useRef(null);
-  const activeVideoId = useRef(null);
-  const chatEndRef = useRef(null);
-
+  // Get messages for the currently active video.
   const messages = video
     ? conversations[video.videoId] || []
     : [];
 
+  const lastRequestedVideoId = useRef(null);
+  const activeVideoId = useRef(null);
 
-  // --------------------------------------------------
-  // AUTO SCROLL
-  // --------------------------------------------------
+  // Stores the currently running stream controller.
+  const streamControllerRef = useRef(null);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "end"
-    });
-  }, [messages, asking]);
-
-
-  // --------------------------------------------------
+  // ----------------------------------------------
   // PROCESS VIDEO
-  // --------------------------------------------------
+  // ----------------------------------------------
 
   const processVideo = useCallback(async (videoInfo) => {
     if (!videoInfo?.videoId) return;
@@ -240,27 +165,37 @@ function App() {
 
       console.log("VidMind video processed:", data);
 
+      console.log("Video metadata sent:", {
+        videoId,
+        title: videoInfo.title,
+        channelName: videoInfo.channelName
+      });
+
     } catch (error) {
       if (activeVideoId.current !== videoId) return;
 
       console.error("Processing error:", error);
 
       lastRequestedVideoId.current = null;
+
       setProcessingStatus("error");
       setProcessingError(error.message);
     }
   }, []);
 
-
-  // --------------------------------------------------
+  // ----------------------------------------------
   // HANDLE VIDEO CHANGES
-  // --------------------------------------------------
+  // ----------------------------------------------
 
   const handleVideoUpdate = useCallback((videoInfo) => {
     if (!videoInfo) {
+      streamControllerRef.current?.abort();
+      streamControllerRef.current = null;
+
       setVideo(null);
       setProcessingStatus("idle");
       setProcessingError("");
+      setAsking(false);
 
       activeVideoId.current = null;
       lastRequestedVideoId.current = null;
@@ -271,22 +206,26 @@ function App() {
     setVideo(videoInfo);
 
     if (activeVideoId.current !== videoInfo.videoId) {
+      // Abort the previous video's active stream.
+      streamControllerRef.current?.abort();
+      streamControllerRef.current = null;
+
       activeVideoId.current = videoInfo.videoId;
       lastRequestedVideoId.current = null;
 
+      setAsking(false);
       setQuestion("");
       setProcessingError("");
       setProcessingStatus("idle");
 
-      // Keep previous video conversations in state.
+      // Preserve previous conversations.
       processVideo(videoInfo);
     }
   }, [processVideo]);
 
-
-  // --------------------------------------------------
+  // ----------------------------------------------
   // DETECT CURRENT YOUTUBE VIDEO
-  // --------------------------------------------------
+  // ----------------------------------------------
 
   useEffect(() => {
     const chromeApi = globalThis.chrome;
@@ -295,6 +234,7 @@ function App() {
       setProcessingError(
         "Please open VidMind through the Chrome extension."
       );
+
       return;
     }
 
@@ -323,7 +263,9 @@ function App() {
 
         const response = await chromeApi.tabs.sendMessage(
           tab.id,
-          { type: "GET_VIDEO_INFO" }
+          {
+            type: "GET_VIDEO_INFO"
+          }
         );
 
         const videoInfo = response?.videoInfo ?? response;
@@ -341,7 +283,7 @@ function App() {
         setProcessingStatus("error");
 
         setProcessingError(
-          "Unable to detect the video. Refresh YouTube and reopen VidMind."
+          "Unable to detect the video. Refresh the YouTube page and reopen VidMind."
         );
       }
     }
@@ -350,30 +292,34 @@ function App() {
 
     return () => {
       chromeApi.runtime.onMessage.removeListener(handleMessage);
+      streamControllerRef.current?.abort();
     };
   }, [handleVideoUpdate]);
 
-
-  // --------------------------------------------------
+  // ----------------------------------------------
   // RETRY VIDEO PROCESSING
-  // --------------------------------------------------
+  // ----------------------------------------------
 
   const retryProcessing = () => {
     if (!video) return;
 
     lastRequestedVideoId.current = null;
+
     processVideo(video);
   };
 
-
-  // --------------------------------------------------
-  // FIND MATCHING YOUTUBE TAB
-  // --------------------------------------------------
+  // ----------------------------------------------
+  // FIND YOUTUBE TAB
+  // ----------------------------------------------
 
   const findYouTubeTab = async (videoId) => {
-    if (!videoId) return null;
+    if (!videoId) {
+      console.error("VidMind: Video ID is missing.");
+      return null;
+    }
 
     const chromeApi = globalThis.chrome;
+
     const tabs = await chromeApi.tabs.query({});
 
     const youtubeTabs = tabs.filter((tab) => {
@@ -386,13 +332,15 @@ function App() {
           url.hostname === "youtube.com" ||
           url.hostname.endsWith(".youtube.com")
         );
+
       } catch {
         return false;
       }
     });
 
-    return youtubeTabs.find((tab) => {
+    const matchingTab = youtubeTabs.find((tab) => {
       const url = new URL(tab.url);
+
       let currentVideoId = null;
 
       if (url.pathname === "/watch") {
@@ -402,17 +350,35 @@ function App() {
       }
 
       return currentVideoId === videoId;
-    }) || null;
+    });
+
+    if (matchingTab) {
+      console.log(
+        "VidMind: Matching YouTube tab found:",
+        matchingTab.url
+      );
+
+      return matchingTab;
+    }
+
+    console.error("VidMind: No matching YouTube tab found.", {
+      requestedVideoId: videoId,
+      availableTabs: youtubeTabs.map((tab) => tab.url)
+    });
+
+    return null;
   };
 
-
-  // --------------------------------------------------
+  // ----------------------------------------------
   // TIMESTAMP NAVIGATION
-  // --------------------------------------------------
+  // ----------------------------------------------
 
   const handleTimestampClick = async (seconds) => {
+    console.log("VidMind timestamp clicked:", seconds);
+
     try {
       const chromeApi = globalThis.chrome;
+
       const videoId = activeVideoId.current;
 
       const youtubeTab = await findYouTubeTab(videoId);
@@ -422,6 +388,7 @@ function App() {
         return;
       }
 
+      // First attempt: seek using content script.
       try {
         const result = await chromeApi.tabs.sendMessage(
           youtubeTab.id,
@@ -431,15 +398,25 @@ function App() {
           }
         );
 
+        console.log("Timestamp seek result:", result);
+
         if (result?.success === true) {
+          console.log("Timestamp navigation successful.");
           return;
         }
 
-      } catch (error) {
-        console.warn("Content script seek failed:", error);
+        console.warn(
+          "Content script did not confirm seek. Using URL fallback."
+        );
+
+      } catch (messageError) {
+        console.warn(
+          "Content script communication failed:",
+          messageError
+        );
       }
 
-      // URL fallback.
+      // Fallback: navigate to the same video at the requested time.
       const url = new URL(youtubeTab.url);
 
       if (
@@ -456,15 +433,16 @@ function App() {
         url: url.toString()
       });
 
+      console.log("VidMind URL fallback:", url.toString());
+
     } catch (error) {
       console.error("Timestamp navigation failed:", error);
     }
   };
 
-
-  // --------------------------------------------------
-  // ASK QUESTION
-  // --------------------------------------------------
+  // ----------------------------------------------
+  // SEND QUESTION USING SSE STREAMING
+  // ----------------------------------------------
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -482,10 +460,10 @@ function App() {
 
     const requestedVideoId = video.videoId;
 
-    // Capture history before adding the new question.
-    const previousMessages =
-      conversations[requestedVideoId] || [];
+    // Capture previous messages BEFORE adding the new question.
+    const previousMessages = conversations[requestedVideoId] || [];
 
+    // Send only the latest 10 previous messages.
     const chatHistory = previousMessages.slice(-10).map(
       (message) => ({
         role: message.role,
@@ -493,6 +471,16 @@ function App() {
       })
     );
 
+    // Unique ID for the assistant's streaming message.
+    const assistantMessageId =
+      `assistant-${Date.now()}-${Math.random()}`;
+
+    // Create a controller for this request.
+    const controller = new AbortController();
+
+    streamControllerRef.current = controller;
+
+    // Add user question and empty assistant message.
     setConversations((previous) => ({
       ...previous,
       [requestedVideoId]: [
@@ -500,6 +488,11 @@ function App() {
         {
           role: "user",
           content: userQuestion
+        },
+        {
+          id: assistantMessageId,
+          role: "assistant",
+          content: ""
         }
       ]
     }));
@@ -507,103 +500,214 @@ function App() {
     setQuestion("");
     setAsking(true);
 
+    let streamedAnswer = "";
+
     try {
       const response = await fetch(
-        `${API_BASE_URL}/ask`,
+        `${API_BASE_URL}/ask/stream`,
         {
           method: "POST",
           headers: {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
           },
           body: JSON.stringify({
             video_id: requestedVideoId,
             question: userQuestion,
             chat_history: chatHistory
-          })
+          }),
+          signal: controller.signal
         }
       );
 
-      const data = await response.json();
-
       if (!response.ok) {
+        let errorMessage = "Unable to generate an answer.";
+
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.detail || errorMessage;
+        } catch {
+          // Keep the default error message.
+        }
+
+        throw new Error(errorMessage);
+      }
+
+      if (!response.body) {
+        throw new Error("Streaming response is not supported.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      let buffer = "";
+      let streamCompleted = false;
+
+      // Update only this video's assistant message.
+      const updateAssistantMessage = (content) => {
+        if (activeVideoId.current !== requestedVideoId) {
+          return;
+        }
+
+        setConversations((previous) => ({
+          ...previous,
+          [requestedVideoId]: (
+            previous[requestedVideoId] || []
+          ).map((message) =>
+            message.id === assistantMessageId
+              ? { ...message, content }
+              : message
+          )
+        }));
+      };
+
+      // Process one complete SSE event.
+      const processEvent = (eventText) => {
+        const dataLines = eventText
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+
+        if (dataLines.length === 0) return false;
+
+        const data = dataLines.join("\n");
+
+        if (data === "[DONE]") {
+          streamCompleted = true;
+          return true;
+        }
+
+        let payload;
+
+        try {
+          payload = JSON.parse(data);
+        } catch {
+          console.warn("Invalid streaming event:", data);
+          return false;
+        }
+
+        if (payload.error) {
+          throw new Error(payload.error);
+        }
+
+        if (typeof payload.token === "string") {
+          streamedAnswer += payload.token;
+          updateAssistantMessage(streamedAnswer);
+        }
+
+        return false;
+      };
+
+      // Read the response as it arrives.
+      while (!streamCompleted) {
+        const { value, done } = await reader.read();
+
+        if (done) {
+          buffer += decoder.decode();
+          break;
+        }
+
+        buffer += decoder.decode(value, {
+          stream: true
+        });
+
+        // SSE events are separated by a blank line.
+        const events = buffer.split(/\r?\n\r?\n/);
+
+        buffer = events.pop() || "";
+
+        for (const eventText of events) {
+          processEvent(eventText);
+
+          if (streamCompleted) break;
+        }
+      }
+
+      // Process any remaining event in the buffer.
+      if (!streamCompleted && buffer.trim()) {
+        processEvent(buffer);
+      }
+
+      if (!streamedAnswer.trim()) {
         throw new Error(
-          data.detail || "Unable to generate an answer."
+          "The server returned an empty response."
         );
       }
 
-      if (activeVideoId.current !== requestedVideoId) {
-        return;
-      }
-
-      setConversations((previous) => ({
-        ...previous,
-        [requestedVideoId]: [
-          ...(previous[requestedVideoId] || []),
-          {
-            role: "assistant",
-            content: data.answer
-          }
-        ]
-      }));
+      console.log("VidMind streaming response completed.");
 
     } catch (error) {
-      console.error("Question error:", error);
+      if (error.name === "AbortError") {
+        console.log("VidMind stream aborted.");
+        return;
+      }
+
+      console.error("Streaming question error:", error);
 
       if (activeVideoId.current !== requestedVideoId) {
         return;
       }
 
+      const errorContent = streamedAnswer
+        ? `${streamedAnswer}\n\n(Response interrupted: ${error.message})`
+        : `Sorry, something went wrong: ${error.message}`;
+
       setConversations((previous) => ({
         ...previous,
-        [requestedVideoId]: [
-          ...(previous[requestedVideoId] || []),
-          {
-            role: "assistant",
-            content: `Sorry, something went wrong: ${error.message}`
-          }
-        ]
+        [requestedVideoId]: (
+          previous[requestedVideoId] || []
+        ).map((message) =>
+          message.id === assistantMessageId
+            ? { ...message, content: errorContent }
+            : message
+        )
       }));
 
     } finally {
-      setAsking(false);
+      // Do not let an older request reset a newer request's state.
+      if (streamControllerRef.current === controller) {
+        streamControllerRef.current = null;
+
+        if (activeVideoId.current === requestedVideoId) {
+          setAsking(false);
+        }
+      }
     }
   };
 
-
-  // --------------------------------------------------
-  // SUGGESTED QUESTIONS
-  // --------------------------------------------------
-
-  const askSuggestedQuestion = (suggestion) => {
-    if (asking || processingStatus !== "ready") return;
-
-    setQuestion(suggestion);
-  };
-
-
-  // --------------------------------------------------
-  // CLEAR CONVERSATION
-  // --------------------------------------------------
+  // ----------------------------------------------
+  // CLEAR CURRENT VIDEO CONVERSATION
+  // ----------------------------------------------
 
   const clearConversation = () => {
-    if (!video || asking) return;
+    if (!video) return;
+
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+
+    setAsking(false);
 
     setConversations((previous) => ({
       ...previous,
       [video.videoId]: []
     }));
+
+    console.log(
+      "VidMind conversation cleared:",
+      video.videoId
+    );
   };
 
-
-  // --------------------------------------------------
+  // ----------------------------------------------
   // UI
-  // --------------------------------------------------
+  // ----------------------------------------------
 
   return (
     <div className="app">
 
-      {/* HEADER */}
+      {/* Header */}
       <header className="header">
+
         <div className="logo">V</div>
 
         <div className="brand">
@@ -611,27 +715,22 @@ function App() {
           <p>Your AI video assistant</p>
         </div>
 
-        <div className="header-badge">
-          <span className="online-dot"></span>
-          AI POWERED
-        </div>
+        <div className="header-badge">AI</div>
+
       </header>
 
-
-      {/* VIDEO INFORMATION */}
+      {/* Video information */}
       <section className="video-section">
 
         {video ? (
           <>
-            <div className="video-label">
-              NOW WATCHING
-            </div>
 
             <div className="video-title">
-              {video.title || "YouTube video"}
+              {video.title}
             </div>
 
             <div className="video-metadata">
+
               {video.channelName && (
                 <span>{video.channelName}</span>
               )}
@@ -641,9 +740,15 @@ function App() {
                   Duration: {video.durationFormatted}
                 </span>
               )}
+
+              {video.viewCount && (
+                <span>{video.viewCount}</span>
+              )}
+
             </div>
 
             <div className={`status ${processingStatus}`}>
+
               <span className="status-dot"></span>
 
               {processingStatus === "processing" &&
@@ -654,166 +759,159 @@ function App() {
 
               {processingStatus === "error" &&
                 "Processing failed"}
+
             </div>
 
-            {processingStatus === "processing" && (
-              <div className="processing-details">
-                <span className="loading-bar"></span>
-                Extracting transcript and preparing video context...
-              </div>
-            )}
-
             {processingStatus === "error" && (
+
               <div className="error-message">
+
                 <p>{processingError}</p>
 
                 <button onClick={retryProcessing}>
                   Retry processing
                 </button>
+
               </div>
+
             )}
+
+            {processingStatus === "processing" && (
+
+              <p className="processing-text">
+                Extracting transcript and generating embeddings...
+              </p>
+
+            )}
+
           </>
+
         ) : (
+
           <div className="empty-video">
-            <div className="empty-video-icon">▶</div>
+
             <h3>No video detected</h3>
+
             <p>Open a YouTube video to start chatting.</p>
+
           </div>
+
         )}
 
       </section>
 
-
-      {/* CHAT AREA */}
+      {/* Chat area */}
       <main className="chat-area">
 
         {messages.length === 0 && (
+
           <div className="welcome">
+
             <div className="welcome-icon">✦</div>
 
-            <h3>What would you like to know?</h3>
+            <h3>Ask anything about this video</h3>
 
             <p>
-              Ask questions, explore key ideas, and get
-              answers grounded in the video's transcript.
-              Click timestamps to jump to those moments.
+              I can summarize the video, explain concepts,
+              and answer questions using its transcript.
+              Click timestamps to jump to relevant moments.
+              I can also understand follow-up questions.
             </p>
 
             {processingStatus === "ready" && (
-              <div className="suggestions">
-                <div className="suggestions-heading">
-                  TRY ASKING
-                </div>
 
-                {SUGGESTED_QUESTIONS.map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    type="button"
-                    className="suggestion"
-                    onClick={() => askSuggestedQuestion(suggestion)}
-                  >
-                    <span>{suggestion}</span>
-                    <span className="suggestion-arrow">↗</span>
-                  </button>
-                ))}
-              </div>
+              <button
+                type="button"
+                className="suggestion"
+                onClick={() =>
+                  setQuestion("Can you summarize this video?")
+                }
+              >
+                Try asking: "Can you summarize this video?"
+              </button>
+
             )}
 
-            {processingStatus === "processing" && (
-              <div className="welcome-loading">
-                <span className="loader"></span>
-                Preparing your video...
-              </div>
-            )}
           </div>
+
         )}
 
-
-        {/* CHAT MESSAGES */}
         {messages.map((message, index) => (
+
           <div
-            key={`${video?.videoId}-${index}`}
+            key={message.id || index}
             className={`message ${message.role}`}
           >
-            <div className="message-avatar">
-              {message.role === "user" ? "Y" : "V"}
+
+            <div className="message-label">
+              {message.role === "user" ? "You" : "VidMind"}
             </div>
 
-            <div className="message-body">
-              <div className="message-label">
-                {message.role === "user" ? "You" : "VidMind"}
-              </div>
+            <div className="message-content">
 
-              <div className="message-content">
-                {message.role === "assistant" ? (
-                  <MarkdownMessage
-                    content={message.content}
-                    onTimestampClick={handleTimestampClick}
-                  />
-                ) : (
-                  message.content
+              {message.role === "assistant"
+                ? renderMessageContent(
+                    message.content,
+                    handleTimestampClick
+                  )
+                : message.content}
+
+              {/* Blinking cursor while this answer streams. */}
+              {asking &&
+                message.id &&
+                message.id === messages[messages.length - 1]?.id && (
+                  <span className="streaming-cursor"></span>
                 )}
-              </div>
+
             </div>
+
           </div>
+
         ))}
 
+        {/* Show thinking only before the first token arrives. */}
+        {asking &&
+          !messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.id &&
+              message.content.length > 0
+          ) && (
 
-        {/* THINKING ANIMATION */}
-        {asking && (
-          <div className="message assistant">
-            <div className="message-avatar">V</div>
+            <div className="message assistant">
 
-            <div className="message-body">
-              <div className="message-label">VidMind</div>
-
-              <div className="message-content thinking-content">
-                <span className="thinking-text">Thinking</span>
-
-                <span className="thinking-dots">
-                  <i></i>
-                  <i></i>
-                  <i></i>
-                </span>
+              <div className="message-label">
+                VidMind
               </div>
-            </div>
-          </div>
-        )}
 
-        <div ref={chatEndRef}></div>
+              <div className="message-content typing">
+                Thinking...
+              </div>
+
+            </div>
+
+          )}
 
       </main>
 
-
-      {/* CLEAR CONVERSATION */}
-      {messages.length > 0 && (
-        <div className="conversation-actions">
-          <button
-            type="button"
-            onClick={clearConversation}
-            disabled={asking}
-          >
-            <span>↺</span> Clear conversation
-          </button>
-        </div>
-      )}
-
-
-      {/* CHAT INPUT */}
+      {/* Question input */}
       <form
         className="chat-input"
         onSubmit={handleSubmit}
       >
+
         <input
           type="text"
           placeholder={
             processingStatus === "ready"
-              ? "Ask anything about this video..."
+              ? "Ask a question about this video..."
               : "Waiting for video processing..."
           }
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
-          disabled={processingStatus !== "ready" || asking}
+          disabled={
+            processingStatus !== "ready" || asking
+          }
         />
 
         <button
@@ -823,16 +921,31 @@ function App() {
             processingStatus !== "ready" ||
             asking
           }
-          title="Send message"
         >
           ↑
         </button>
+
       </form>
 
+      {/* Clear conversation */}
+      {messages.length > 0 && (
 
-      {/* FOOTER */}
+        <div className="conversation-actions">
+
+          <button
+            type="button"
+            onClick={clearConversation}
+            disabled={asking}
+          >
+            Clear conversation
+          </button>
+
+        </div>
+
+      )}
+
       <footer className="footer">
-        <span>✦</span> VidMind AI · Powered by video context
+        VidMind AI · Answers based on video transcripts
       </footer>
 
     </div>
