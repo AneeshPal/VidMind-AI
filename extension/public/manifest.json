@@ -12,7 +12,7 @@
 
   "host_permissions": [
     "https://www.youtube.com/*",
-    "http://127.0.0.1:8000/*"
+    "https://vidmind-api.onrender.com/*"
   ],
 
   "background": {
